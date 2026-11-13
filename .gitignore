@@ -1,0 +1,23 @@
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# local data and secrets
+data/
+.pytest_cache/
+shots/
+# qoder ide local artifacts
+.qoder/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
