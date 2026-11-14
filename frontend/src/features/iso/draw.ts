@@ -58,6 +58,8 @@ export interface BoxStyle {
   top?: number
   outline?: number | null
   alpha?: number
+  /** Skip the form shading (for thin decals and emissive parts). */
+  flat?: boolean
 }
 
 /** Axis-aligned box centred on (cx, cz), from height y0 to y0 + h. Draws only the three faces the
@@ -72,6 +74,35 @@ export function box(g: Graphics, cx: number, cz: number, w: number, d: number, y
   face(g, [[x0, z1, y0], [x1, z1, y0], [x1, z1, y1], [x0, z1, y1]], shade(color, s.left ?? 0.84), alpha, stroke)
   face(g, [[x1, z0, y0], [x1, z1, y0], [x1, z1, y1], [x1, z0, y1]], shade(color, s.right ?? 0.7), alpha, stroke)
   face(g, [[x0, z0, y1], [x1, z0, y1], [x1, z1, y1], [x0, z1, y1]], shade(color, s.top ?? 1), alpha, stroke)
+  if (alpha === 1 && !s.flat) {
+    // Cheap form shading: the lower part of each side falls off toward the floor, and the two
+    // top edges facing the viewer catch the light.
+    if (h > 0.3) {
+      const ym = y0 + h * 0.4
+      face(g, [[x0, z1, y0], [x1, z1, y0], [x1, z1, ym], [x0, z1, ym]], 0x000000, 0.09)
+      face(g, [[x1, z0, y0], [x1, z1, y0], [x1, z1, ym], [x1, z0, ym]], 0x000000, 0.11)
+    }
+    if (w > 0.12 && d > 0.12) {
+      line(g, [x0, z1, y1], [x1, z1, y1], 0xffffff, 0.7, 0.28)
+      line(g, [x1, z0, y1], [x1, z1, y1], 0xffffff, 0.7, 0.16)
+    }
+  }
+  return g
+}
+
+/** Soft radial light on the floor (or at height y), faked with stacked ellipses so it needs no
+ *  gradient texture. `alpha` is the brightness at the centre. */
+export function glow(g: Graphics, x: number, z: number, r: number, color: number, alpha: number, y = 0, steps = 7): Graphics {
+  for (let i = 0; i < steps; i++) floorEllipse(g, x, z, r * (1 - i / steps), color, alpha / steps, y)
+  return g
+}
+
+/** Contact shadow of a box footprint, cast toward the lower right (light comes from upper left). */
+export function shadow(g: Graphics, cx: number, cz: number, w: number, d: number, reach = 0.32, alpha = 0.13): Graphics {
+  const x0 = cx - w / 2; const x1 = cx + w / 2
+  const z0 = cz - d / 2; const z1 = cz + d / 2
+  face(g, [[x0 + 0.04, z1, 0.003], [x1, z0 + 0.04, 0.003], [x1 + reach, z0 + reach * 0.5, 0.003],
+    [x1 + reach, z1 + reach * 0.5, 0.003], [x0 + reach, z1 + reach * 0.5, 0.003]], 0x000000, alpha)
   return g
 }
 

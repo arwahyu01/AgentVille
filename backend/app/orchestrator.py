@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app import conversation_service
 from app import task_service
-from app.agent_actions import ActionGate
+from app.agent_actions import ActionGate, redact
 from app.ai import registry
 from app.ai import fallback as ai_fallback
 from app.ai.base import AIProvider, Persona, ProviderResult
@@ -679,6 +679,30 @@ class Orchestrator(threading.Thread):
         db.commit()
 
 
+    def _review_visits(self, db, anchor_id: int, conversation_id: int, failed_steps, findings: str) -> None:
+        """QC failed and the steps go back for revision: each responsible specialist returns to
+        its own desk, and one `review_visit` frame per step records that the Reviewer brings the
+        findings there (actor = Reviewer, recipient = step owner). The office replays the visit
+        from that frame; without a Reviewer agent on the roster nothing is announced."""
+        reviewer = db.query(Agent).filter(Agent.role == "Reviewer").order_by(Agent.id).first()
+        line = redact(findings, 160) or "temuan QC"
+        children = db.query(Task).filter(Task.parent_id == anchor_id).all()
+        for child in children:
+            if child.plan_step_index not in failed_steps or not child.agent_id:
+                continue
+            owner = db.get(Agent, child.agent_id)
+            if owner is None:
+                continue
+            room = room_for_role(owner.role)
+            seat_agent(db, owner.id, room=room, target_room="")
+            if reviewer is not None and reviewer.id != owner.id:
+                add_event(db, child.id, "review_visit",
+                          f"Temuan QC untuk langkah {child.plan_step_index}: {line}",
+                          conversation_id=conversation_id, agent_id=reviewer.id,
+                          step_index=child.plan_step_index, actor_agent_id=reviewer.id,
+                          recipient_agent_id=owner.id,
+                          from_room=room_for_role(reviewer.role), to_room=room)
+
     def _step_model(self, cfg: dict, coding: bool) -> str:
         if not coding:
             return cfg["text_model"]
@@ -956,6 +980,7 @@ class Orchestrator(threading.Thread):
                         and iteration <= cfg["retry_max"] and failed_steps):
                     transition(db, anchor, "running",
                                f"QC round {iteration} failed; revising steps {failed_steps}")
+                    self._review_visits(db, anchor_id, conversation_id, failed_steps, findings)
                     db.commit()
                 else:
                     reason = ("QC failed" if verdict == "fail"

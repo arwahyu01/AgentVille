@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { stationSlots } from '../../lib/activity'
 import { ROOMS, seatAt } from '../../lib/officeLayout'
 import type { Agent, ClaudeSession } from '../../types'
-import { BREAK_AFTER_MS, claudeBubble, claudeGoals, claudeNames, freeDesks } from './claudeSeats'
+import { BREAK_AFTER_MS, PANTRY_SPOTS, claudeBubble, claudeGoals, claudeNames, freeDesks } from './claudeSeats'
 
 const NOW = Date.parse('2026-11-14T10:00:00Z')
 
@@ -61,5 +61,28 @@ describe('claude labels', () => {
     expect(claudeBubble(done, NOW, false)).toBe('Selesai: ok')
     expect(claudeBubble({ ...done, updated_at: new Date(NOW - 60_000).toISOString() }, NOW, false)).toBeNull()
     expect(claudeBubble({ ...done, updated_at: new Date(NOW - 60_000).toISOString() }, NOW, true)).toBe('Selesai: ok')
+  })
+})
+
+describe('pantry spots', () => {
+  it('are distinct, inside the pantry and not on top of each other', () => {
+    const [x0, z0, x1, z1] = ROOMS.pantry.box
+    for (const [x, z] of PANTRY_SPOTS) {
+      expect(x).toBeGreaterThan(x0 + 0.3)
+      expect(x).toBeLessThan(x1 - 0.7) // counter run along the east wall
+      expect(z).toBeGreaterThan(z0 + 0.3)
+      expect(z).toBeLessThan(z1 - 0.2)
+    }
+    for (let i = 0; i < PANTRY_SPOTS.length; i++) {
+      for (let j = i + 1; j < PANTRY_SPOTS.length; j++) {
+        const d = Math.hypot(PANTRY_SPOTS[i][0] - PANTRY_SPOTS[j][0], PANTRY_SPOTS[i][1] - PANTRY_SPOTS[j][1])
+        expect(d, `spots ${i} and ${j}`).toBeGreaterThanOrEqual(0.6)
+      }
+    }
+  })
+
+  it('give every seeded agent id its own break spot', () => {
+    const spots = Array.from({ length: 14 }, (_, i) => PANTRY_SPOTS.length - 1 - ((i + 1) % PANTRY_SPOTS.length))
+    expect(new Set(spots).size).toBe(14)
   })
 })

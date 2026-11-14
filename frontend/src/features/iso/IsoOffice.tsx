@@ -8,13 +8,16 @@ import { poseFor, pulseAge, stationSlots, taskOfAgent } from '../../lib/activity
 import { ROOMS, ROOM_ORDER, FLOOR, OPERATIONAL_ROLES } from '../../lib/officeLayout'
 import { fitView, iso, zIndexOf, zoomAt, facingView, type IsoView } from '../../lib/iso'
 import { useSocialLife } from '../office/useSocialLife'
-import { activeSocialLine, type CueMap } from '../office/socialScript'
+import { activeSocialLine, prefersReducedMotion, type CueMap } from '../office/socialScript'
 import type { StaffVariant } from '../office/staffScript'
 import { X } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { Agent, ClaudeSession, StreamEvent, Task } from '../../types'
 import { Avatar, bubbleLine, lookForAgent, lookForClaude, type AlertKind } from './avatar'
 import { actionFor } from './actions'
+import { breakGoalFor, errandFor } from './errands'
+import type { MotionGoal } from './motion'
+import { gestureFor, isBreakGoal, isPresenter, presenterGoal } from './poses'
 import { claudeBubble, claudeGoals, claudeNames, freeDesks, onBreak, type Desk } from './claudeSeats'
 import { buildOffice, type OfficeArt } from './officeArt'
 import { agentTag, goalFor, initialMotion, stepMotion, type MotionState } from './motion'
@@ -51,6 +54,8 @@ interface Live {
   size: number
   onSelect: (id: number) => void
   onStaffTalk: (variant: StaffVariant) => void
+  errands: Record<number, StreamEvent>
+  lastTasks: Record<number, Task | undefined>
   claude: ClaudeSession[]
   claudeNames: Record<string, string>
   desks: Desk[]
@@ -67,13 +72,15 @@ interface Camera {
   focus: string | null
 }
 
-export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClearSelection, activity, meetingTopic, onStaffTalk, qa }: {
+export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClearSelection, activity, errands, meetingTopic, onStaffTalk, qa }: {
   agents: Agent[]
   tasks: Task[]
   selectedId: number | null
   onSelect: (id: number) => void
   onClearSelection: () => void
   activity: Record<number, StreamEvent>
+  /** Newest handoff / review-visit frame per acting agent. */
+  errands: Record<number, StreamEvent>
   meetingTopic?: string
   onStaffTalk: (variant: StaffVariant) => void
   qa?: boolean
@@ -94,6 +101,11 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
     return out
   }, [agents, tasks])
 
+  const lastTasks = useMemo(() => {
+    const out: Record<number, Task | undefined> = {}
+    for (const a of agents) out[a.id] = taskOfAgent(a.id, tasks)
+    return out
+  }, [agents, tasks])
   const [claude, setClaude] = useState<ClaudeSession[]>([])
   const [claudeSelected, setClaudeSelected] = useState<string | null>(null)
   const desks = useMemo(() => freeDesks(agents, slots), [agents, slots])
@@ -114,8 +126,8 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
     return () => { alive = false; window.clearInterval(timer) }
   }, [])
 
-  const live = useRef<Live>({ agents, slots, cues, activity, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude })
-  live.current = { agents, slots, cues, activity, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude }
+  const live = useRef<Live>({ agents, slots, cues, activity, errands, lastTasks, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude })
+  live.current = { agents, slots, cues, activity, errands, lastTasks, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude }
   const camera = useRef<Camera>({ view: { scale: 1, x: 0, y: 0 }, target: null, focus: null })
   const artRef = useRef<OfficeArt | null>(null)
   const dragged = useRef(false)
@@ -163,6 +175,7 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
     const app = new Application()
     const avatars = new Map<number, { avatar: Avatar; motion: MotionState }>()
     const claudeAvatars = new Map<string, { avatar: Avatar; motion: MotionState }>()
+    const goalKeys: Record<number, string> = {}
     let ro: ResizeObserver | null = null
     const cleanups: (() => void)[] = []
 
@@ -213,9 +226,24 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
       ro.observe(el)
 
       let labelClock = 0
+      let calm = prefersReducedMotion()
+      // Normal runs clamp one frame to 50 ms, so a throttled background tab does not teleport
+      // anyone. The `?qa` probe instead catches up in 50 ms sub-steps, so a headless or occluded
+      // browser (which can run at 1 fps) still shows the same movement as a live one.
+      let wallDt = 0
+      let lastWall = performance.now()
+      const advance = (m: MotionState, g: MotionGoal, dt: number) => {
+        // Pixi caps a tick at 100 ms; the probe uses the wall clock instead.
+        const span = qa ? Math.max(dt, wallDt) : dt
+        const n = qa ? Math.min(100, Math.max(1, Math.ceil(span / 0.05))) : 1
+        for (let i = 0; i < n; i++) stepMotion(m, g, span / n)
+      }
       let ledClock = 0
       app.ticker.add((ticker) => {
         const dt = ticker.deltaMS / 1000
+        const wall = performance.now()
+        wallDt = Math.min(5, (wall - lastWall) / 1000)
+        lastWall = wall
         const now = Date.now()
         const d = live.current
 
@@ -223,10 +251,12 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
         const cam = camera.current
         if (cam.target) {
           const k = Math.min(1, dt * 6)
+          // Reduced motion: jump straight to the framing instead of easing toward it.
+          const e = calm ? 1 : k
           cam.view = {
-            scale: cam.view.scale + (cam.target.scale - cam.view.scale) * k,
-            x: cam.view.x + (cam.target.x - cam.view.x) * k,
-            y: cam.view.y + (cam.target.y - cam.view.y) * k,
+            scale: cam.view.scale + (cam.target.scale - cam.view.scale) * e,
+            x: cam.view.x + (cam.target.x - cam.view.x) * e,
+            y: cam.view.y + (cam.target.y - cam.view.y) * e,
           }
           if (Math.abs(cam.view.scale - cam.target.scale) < 0.001
             && Math.abs(cam.view.x - cam.target.x) < 0.5
@@ -254,7 +284,7 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
 
         labelClock += dt
         const refreshLabels = labelClock > 0.2
-        if (refreshLabels) labelClock = 0
+        if (refreshLabels) { labelClock = 0; calm = prefersReducedMotion() }
         const lit = new Map<string, number>()
 
         for (const agent of d.agents) {
@@ -263,8 +293,16 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
           const { avatar, motion } = entry
           const cue = d.cues[agent.id]
           const slot = d.slots[agent.id] ?? 0
-          const goal = goalFor(agent, slot, cue)
-          stepMotion(motion, goal, dt)
+          // Priority: a trip replayed from a real handoff/review frame, then a local social cue,
+          // then the after-work break, then the desk the backend assigned.
+          const errand = errandFor(d.errands[agent.id], d.agents, d.slots, now)
+          const base = cue ? goalFor(agent, slot, cue) : breakGoalFor(agent, d.lastTasks[agent.id], now) ?? goalFor(agent, slot)
+          // While a plan waits in the meeting room the Coordinator stands up beside the screen.
+          const presenting = !errand && !cue && isPresenter(agent, base)
+          const goal = errand?.goal ?? (presenting ? presenterGoal() : base)
+          advance(motion, goal, dt)
+          goalKeys[agent.id] = `${goal.key}|route:${motion.route.length}`
+          avatar.setCarrying(!!errand?.carrying)
           const p = iso(motion.x, motion.z)
           avatar.root.position.set(p.x, p.y)
           avatar.root.zIndex = zIndexOf(motion.x, motion.z)
@@ -275,9 +313,14 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
           const typing = !goal.social && goal.kind === 'work' && motion.sit > 0.6 && agent.status === 'working'
             && (act ? act.typing : true)
           const line = cue ? activeSocialLine(cue, agent.id, now) : null
+          const greeting = cue?.kind === 'greet' && now < cue.talkStart + 1800
           avatar.setPose({
             ...facingView(motion.facing), sit: motion.sit, moving: motion.moving, phase: motion.phase,
-            typing, talking: !!line,
+            typing, talking: !!line, calm,
+            gesture: gestureFor({
+              moving: motion.moving, seated: goal.seated && motion.sit > 0.5, presenting,
+              onBreak: isBreakGoal(goal), attention: greeting, action: act?.kind ?? null, typing,
+            }),
           })
           const age = pulseAge(event, now)
           const fresh = !cue && age >= 0 && age < 2.2
@@ -293,7 +336,8 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
             avatar.setLabel(agent.name, agentTag(agent, d.taskIds[agent.id]), agent.status)
             const alert: AlertKind = agent.status === 'waiting' ? 'waiting' : agent.status === 'failed' ? 'failed' : null
             avatar.setAlert(alert)
-            if (line) avatar.setBubble(bubbleLine(line.text), 'social')
+            if (errand) avatar.setBubble(bubbleLine(errand.label), 'event', errand.kind === 'review' ? 'read' : null)
+            else if (line) avatar.setBubble(bubbleLine(line.text), 'social')
             else if (event?.message && (age < 14 || d.selectedId === agent.id)) avatar.setBubble(bubbleLine(event.message), 'event', act?.kind ?? null)
             else avatar.setBubble(null)
           }
@@ -317,13 +361,19 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
             claudeAvatars.set(s.session_id, entry)
           }
           const { avatar, motion } = entry
-          stepMotion(motion, goal, dt)
+          advance(motion, goal, dt)
           const p = iso(motion.x, motion.z)
           avatar.root.position.set(p.x, p.y)
           avatar.root.zIndex = zIndexOf(motion.x, motion.z)
+          const sessionTyping = s.status === 'working' && motion.sit > 0.6
           avatar.setPose({
             ...facingView(motion.facing), sit: motion.sit, moving: motion.moving, phase: motion.phase,
-            typing: s.status === 'working' && motion.sit > 0.6, talking: false,
+            typing: sessionTyping, talking: false, calm,
+            // A session waiting on the user raises a hand; a quiet finished one sips coffee.
+            gesture: gestureFor({
+              moving: motion.moving, seated: goal.seated && motion.sit > 0.5, presenting: false,
+              onBreak: isBreakGoal(goal), attention: s.status === 'waiting', action: null, typing: sessionTyping,
+            }),
           })
           const picked = d.claudeSelected === s.session_id
           avatar.setSelected(picked, s.status)
@@ -349,7 +399,7 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
         ledClock += dt
         if (ledClock > 0.35) {
           ledClock = 0
-          art.leds.forEach((g, i) => { g.alpha = (Math.sin(now / 300 + i * 1.7) > -0.2) ? 1 : 0.25 })
+          art.leds.forEach((g, i) => { g.alpha = calm ? 1 : (Math.sin(now / 300 + i * 1.7) > -0.2) ? 1 : 0.25 })
         }
       })
 
@@ -396,6 +446,8 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
           positions: () => Object.fromEntries([...avatars].map(([id, e]) => [id, { x: e.motion.x, z: e.motion.z, sit: e.motion.sit }])),
           claude: () => Object.fromEntries([...claudeAvatars].map(([id, e]) => [id, { x: e.motion.x, z: e.motion.z, sit: e.motion.sit }])),
           view: () => camera.current.view,
+          goals: () => ({ ...goalKeys }),
+          leds: () => (artRef.current?.leds ?? []).map((g) => g.alpha),
         }
       }
     }).catch((err: unknown) => {

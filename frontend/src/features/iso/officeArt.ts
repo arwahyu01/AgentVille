@@ -6,7 +6,7 @@ import { Container, Graphics, Text } from 'pixi.js'
 import { iso, zIndexOf } from '../../lib/iso'
 import { DOOR_H, FLOOR, ROOMS, WALLS, type Room } from '../../lib/officeLayout'
 import type { StaffVariant } from '../office/staffScript'
-import { box, floorEllipse, floorRect, hex, line, mix, rng, shade, wallText, wallX, wallZ } from './draw'
+import { box, face, floorEllipse, floorRect, glow, hex, line, mix, rng, shade, shadow, wallText, wallX, wallZ } from './draw'
 
 export interface StaffSpot { variant: StaffVariant; x: number; z: number; facing: number }
 
@@ -36,6 +36,8 @@ const K = {
 }
 
 const TAU = Math.PI * 2
+/** Pendant lamps (world x, z): reception, meeting table, the two pantry tables. */
+const PENDANTS: [number, number][] = [[-11.4, 4.6], [6.2, 5.6], [10.3, 4.2], [10.6, 7.2]]
 
 export function buildOffice(): OfficeArt {
   const under = new Container()
@@ -77,7 +79,11 @@ export function buildOffice(): OfficeArt {
   for (const z of [-1.45, 1.45]) line(floors, [-HX + 0.3, z, 0], [HX - 0.3, z, 0], K.gold, 1, 0.75)
   for (const r of Object.values(ROOMS)) roomFloor(floors, r)
   rugs(floors)
+  decals(floors)
   under.addChild(floors)
+  const light = new Graphics()
+  ambient(light)
+  under.addChild(light)
 
   // ── Back walls: glazing with a painted skyline ───────────────────────────────
   const windows = new Graphics()
@@ -114,10 +120,32 @@ export function buildOffice(): OfficeArt {
         } else if (w.kind === 'solid') {
           const [p, q] = span(u, u1)
           const thick = 0.12
-          if (horizontal) box(g, (p + q) / 2, w.a[1], q - p, thick, 0, 1.15, 0xe6dccb, { outline: null })
-          else box(g, w.a[0], (p + q) / 2, thick, q - p, 0, 1.15, 0xe6dccb, { outline: null })
+          const base = 0xb9a98f
+          const trim = 0xf7f1e4
+          if (horizontal) {
+            const m = (p + q) / 2
+            box(g, m, w.a[1], q - p, thick, 0, 1.15, 0xe6dccb, { outline: null })
+            box(g, m, w.a[1], q - p, thick + 0.02, 0, 0.1, base, { outline: null, flat: true })
+            box(g, m, w.a[1], q - p + 0.01, thick + 0.04, 1.15, 0.05, trim, { outline: null, flat: true })
+            line(g, [p, w.a[1] + thick / 2, 0.1], [p, w.a[1] + thick / 2, 1.15], 0x9c8d76, 0.7, 0.5)
+          } else {
+            const m = (p + q) / 2
+            box(g, w.a[0], m, thick, q - p, 0, 1.15, 0xe6dccb, { outline: null })
+            box(g, w.a[0], m, thick + 0.02, q - p, 0, 0.1, base, { outline: null, flat: true })
+            box(g, w.a[0], m, thick + 0.04, q - p + 0.01, 1.15, 0.05, trim, { outline: null, flat: true })
+            line(g, [w.a[0] + thick / 2, p, 0.1], [w.a[0] + thick / 2, p, 1.15], 0x9c8d76, 0.7, 0.5)
+          }
         } else {
           quad(u, u1, 0, w.height, K.glass, 0.13)
+          // Diagonal reflection, so a pane reads as glass instead of a tinted sheet.
+          if (u1 - u > 0.6) {
+            const [p, q] = span(u + 0.12, u + 0.42)
+            const streak = (a: number, b: number, alpha: number) => face(g, horizontal
+              ? [[p + a, w.a[1], 0.5], [p + b, w.a[1], 0.5], [q + b, w.a[1], 1.9], [q + a, w.a[1], 1.9]]
+              : [[w.a[0], p + a, 0.5], [w.a[0], p + b, 0.5], [w.a[0], q + b, 1.9], [w.a[0], q + a, 1.9]], 0xffffff, alpha)
+            streak(0, 0.1, 0.16)
+            streak(0.16, 0.2, 0.1)
+          }
           quad(u, u1, 0, 0.08, K.mullion)
           quad(u, u1, w.height - 0.06, w.height, K.mullion)
           quad(u, Math.min(u1, u + 0.045), 0, w.height, K.mullion, 0.9)
@@ -314,6 +342,24 @@ export function buildOffice(): OfficeArt {
     }
     staff.push({ variant: 'teller', x: 0.5, z: -8.55, facing: 0 })
     deskRoom(r, { top: 0xe8e3d9, visitor: true, chairColor: 0x7d93a0 })
+    // Queue stanchions with tape down both sides of the lane, as in the 3D fit-out.
+    for (const lx of [-0.6, 4.6]) {
+      const lane = piece(lx, -5.8, 0.2)
+      const poles = [-7.0, -5.8, -4.6]
+      for (let i = 0; i < poles.length; i++) {
+        const pz = poles[i]
+        box(lane, lx, pz, 0.26, 0.26, 0, 0.03, 0x8b9298, { outline: null, flat: true })
+        box(lane, lx, pz, 0.05, 0.05, 0.03, 0.92, 0xa9afb5, { outline: null, flat: true })
+        const top = iso(lx, pz, 0.98)
+        lane.circle(top.x, top.y, 2.1).fill(0x6f777e)
+        if (i > 0) line(lane, [lx, poles[i - 1], 0.88], [lx, pz, 0.88], 0xc58ba0, 1.8, 0.95)
+      }
+    }
+    const kiosk = piece(-1.05, -4.0)
+    shadow(kiosk, -1.05, -4.0, 0.32, 0.32, 0.3)
+    box(kiosk, -1.05, -4.0, 0.3, 0.3, 0, 1.05, 0x39414b)
+    wallZ(kiosk, -3.849, -1.18, -0.92, 0.72, 1.0, 0x6fe0d2)
+    box(kiosk, -1.05, -4.0, 0.34, 0.34, 1.05, 0.05, 0x4a525c, { outline: null, flat: true })
     const q = piece(2.0, -8.95)
     wallZ(q, -8.94, 1.2, 2.8, 2.05, 2.6, 0x14212b)
     const t = group(2.0, -8.94, 0.01)
@@ -362,6 +408,9 @@ export function buildOffice(): OfficeArt {
     box(p, 12.55, -2.3, 0.5, 0.45, 0.75, 0.22, 0xe4e6e8)
   }
 
+  // Pendant lamps over the places people gather; their light pools are in `ambient`.
+  for (const [x, z] of PENDANTS) pendant(x, z)
+
   // Corridor
   {
     plant(-3.2, 1.42, 1.0)
@@ -375,6 +424,47 @@ export function buildOffice(): OfficeArt {
   return { under, back, props, screens, leds, meetingText: meetingText!, staff }
 
   // ── Builders (hoisted) ───────────────────────────────────────────────────────
+
+  /** Static light and shade painted on the floor: wall contact shadows, daylight falling in
+   *  through the two window walls, and warm pools under the lamps. */
+  function ambient(g: Graphics) {
+    // Contact shadow where the floor meets the back walls.
+    for (let i = 0; i < 4; i++) {
+      const d = 0.16 * (i + 1)
+      floorRect(g, -HX, -HZ, HX, -HZ + d, 0x1b1410, 0.045, 0.006)
+      floorRect(g, -HX, -HZ, -HX + d, HZ, 0x1b1410, 0.045, 0.006)
+    }
+    // Daylight: one soft slanted patch per window bay, fading into the room.
+    for (let x = -HX + 0.2; x < HX - 1; x += 1.3) {
+      for (let k = 0; k < 3; k++) {
+        const len = 1.1 + k * 0.75
+        face(g, [[x, -HZ, 0.007], [x + 1.05, -HZ, 0.007], [x + 1.05 + len * 0.45, -HZ + len, 0.007], [x + len * 0.45, -HZ + len, 0.007]],
+          0xfff3d6, 0.035)
+      }
+    }
+    for (let z = -HZ + 0.2; z < HZ - 1; z += 1.3) {
+      for (let k = 0; k < 3; k++) {
+        const len = 1.1 + k * 0.75
+        face(g, [[-HX, z, 0.007], [-HX, z + 1.05, 0.007], [-HX + len, z + 1.05 + len * 0.45, 0.007], [-HX + len, z + len * 0.45, 0.007]],
+          0xfff3d6, 0.035)
+      }
+    }
+    // Warm pools under pendants and floor lamps, cool spill in the server room.
+    for (const [x, z] of PENDANTS) glow(g, x, z, 2.1, 0xffc878, 0.2, 0.008)
+    glow(g, 5.75, -4.6, 1.3, 0xffc878, 0.2, 0.008)
+    glow(g, -10.8, -5.2, 2.4, 0x7fd6e6, 0.12, 0.008)
+    glow(g, 7.2, -8.1, 1.8, 0x7fb3d4, 0.12, 0.008)
+    glow(g, -5.0, -8.2, 1.6, 0x8fb7ff, 0.1, 0.008)
+  }
+
+  function pendant(x: number, z: number) {
+    const g = piece(x, z, 0.45)
+    line(g, [x, z, 2.95], [x, z, 2.3], 0x8a8f98, 1, 0.9)
+    box(g, x, z, 0.3, 0.3, 2.12, 0.18, 0xc79a55, { outline: null })
+    box(g, x, z, 0.26, 0.26, 2.06, 0.07, 0xffe2a3, { outline: null, flat: true, left: 1, right: 0.95 })
+    const p = iso(x, z, 2.05)
+    for (const [r, a] of [[16, 0.07], [10, 0.1], [5, 0.16]]) g.circle(p.x, p.y, r).fill({ color: 0xffd38a, alpha: a })
+  }
 
   function lamp(g: Graphics, x: number, z: number, y: number) {
     const p = iso(x, z, y)
@@ -391,12 +481,34 @@ export function buildOffice(): OfficeArt {
 
   function marbleFloor(g: Graphics, [x0, z0, x1, z1]: [number, number, number, number], base = K.marble, seam = K.marbleLine, step = 1.0) {
     floorRect(g, x0, z0, x1, z1, base)
+    const vein = rng(Math.round(x0 * 13 + z0 * 29 + step * 7))
+    for (let x = Math.floor(x0 / step) * step; x < x1; x += step) {
+      for (let z = Math.floor(z0 / step) * step; z < z1; z += step) {
+        const k = vein()
+        const ax = Math.max(x0, x); const az = Math.max(z0, z)
+        const bx = Math.min(x1, x + step); const bz = Math.min(z1, z + step)
+        if (bx - ax < 0.05 || bz - az < 0.05) continue
+        if (k > 0.6) floorRect(g, ax, az, bx, bz, k > 0.82 ? 0xffffff : 0x000000, k > 0.82 ? 0.16 : 0.035)
+        if (k < 0.3) line(g, [ax + (bx - ax) * 0.15, az + (bz - az) * (0.2 + k), 0], [ax + (bx - ax) * 0.85, az + (bz - az) * (0.9 - k), 0], seam, 0.5, 0.45)
+      }
+    }
     for (let x = Math.ceil(x0 / step) * step; x < x1; x += step) line(g, [x, z0, 0], [x, z1, 0], seam, 0.7, 0.8)
     for (let z = Math.ceil(z0 / step) * step; z < z1; z += step) line(g, [x0, z, 0], [x1, z, 0], seam, 0.7, 0.8)
   }
 
   function woodFloor(g: Graphics, [x0, z0, x1, z1]: [number, number, number, number], base: number) {
     floorRect(g, x0, z0, x1, z1, base)
+    // Individual planks vary a little in tone, which is most of what makes wood read as wood.
+    const tone = rng(Math.round(x0 * 31 + z0 * 17))
+    let band = 0
+    for (let z = z0; z < z1 - 0.01; z += 0.28, band++) {
+      for (let x = x0 - 1.8 + (band % 3) * 0.6 + 0.4; x < x1; x += 1.8) {
+        const k = tone()
+        if (k < 0.55) continue
+        floorRect(g, Math.max(x0, x), z, Math.min(x1, x + 1.8), Math.min(z1, z + 0.28),
+          k > 0.8 ? shade(base, 1.09) : shade(base, 0.92), 0.55)
+      }
+    }
     const seam = shade(base, 0.8)
     let row = 0
     for (let z = z0 + 0.28; z < z1; z += 0.28, row++) {
@@ -434,6 +546,10 @@ export function buildOffice(): OfficeArt {
     const rug = (x0: number, z0: number, x1: number, z1: number, color: number) => {
       floorRect(g, x0, z0, x1, z1, color, 1, 0.004)
       floorRect(g, x0 + 0.12, z0 + 0.12, x1 - 0.12, z1 - 0.12, shade(color, 1.18), 0.35, 0.005)
+      floorRect(g, x0 + 0.26, z0 + 0.26, x1 - 0.26, z1 - 0.26, color, 1, 0.0055)
+      // Soft shadow along the two far edges so the rug sits on the floor instead of in it.
+      floorRect(g, x0, z1, x1 + 0.07, z1 + 0.07, 0x000000, 0.14, 0.004)
+      floorRect(g, x1, z0 + 0.07, x1 + 0.07, z1, 0x000000, 0.14, 0.004)
     }
     rug(-7.1, 3.95, -2.7, 8.55, K.navy)
     rug(-2.25, 3.95, 3.25, 8.55, 0x8b586c)
@@ -444,6 +560,15 @@ export function buildOffice(): OfficeArt {
     rug(-12.1, 3.3, -10.3, 5.9, 0xd9cdb8)
     floorEllipse(g, -8.9, 6.0, 0.95, 0xcab89c, 0.9, 0.004)
     floorEllipse(g, 10.6, 5.6, 1.6, 0xe2d6c2, 0.7, 0.004)
+  }
+
+  /** Painted guides on the customer-service floor: chevrons toward the counter and a stop line. */
+  function decals(g: Graphics) {
+    for (const z of [-7.0, -6.2, -5.4]) {
+      line(g, [1.55, z + 0.22, 0.01], [2.0, z, 0.01], 0x6fa5c0, 2, 0.75)
+      line(g, [2.0, z, 0.01], [2.45, z + 0.22, 0.01], 0x6fa5c0, 2, 0.75)
+    }
+    floorRect(g, -0.55, -4.45, 4.55, -4.38, 0xf0d98a, 0.8, 0.012)
   }
 
   function windowWall(g: Graphics, plane: 'x' | 'z', fixed: number, from: number, to: number, h: number, seed: number) {
@@ -476,6 +601,16 @@ export function buildOffice(): OfficeArt {
       }
     }
     quad(from, to, 0.12, h, 0xffffff, 0.08)
+    // Roller blinds, lowered by different amounts on roughly half of the bays.
+    const blind = rng(seed * 7 + 3)
+    for (let u = from + 0.07; u < to - 1.2; u += 1.3) {
+      if (blind() > 0.5) continue
+      const drop = 0.5 + blind() * 1.0
+      const b = Math.min(to, u + 1.16)
+      quad(u, b, h - drop, h - 0.12, 0xf1e8d6, 0.93)
+      for (let y = h - 0.22; y > h - drop; y -= 0.1) quad(u, b, y, y + 0.014, 0xcfc3ad, 0.75)
+      quad(u, b, h - drop, h - drop + 0.045, 0xb4a68c)
+    }
     for (let u = from; u <= to + 0.001; u += 1.3) quad(u, Math.min(to, u + 0.07), 0, h, 0x3a414b)
     quad(from, to, h - 0.12, h, 0x3a414b)
     quad(from, to, 0, 0.14, 0x4a515c)
@@ -484,10 +619,14 @@ export function buildOffice(): OfficeArt {
   function desk(x: number, z: number, seed: number, top = K.walnutTop, monitors = 2): Graphics[] {
     const c = group(x, z)
     const g = new Graphics()
+    shadow(g, x, z, 1.32, 0.68, 0.34)
     box(g, x - 0.6, z, 0.06, 0.58, 0, 0.7, K.frame, { outline: null })
     box(g, x + 0.6, z, 0.06, 0.58, 0, 0.7, K.frame, { outline: null })
     box(g, x, z - 0.26, 1.18, 0.03, 0.3, 0.35, shade(K.frame, 1.2), { outline: null })
     box(g, x, z, 1.32, 0.68, 0.7, 0.05, top)
+    for (const dz of [-0.18, 0.02, 0.2]) {
+      line(g, [x - 0.62, z + dz, 0.752], [x + 0.62, z + dz, 0.752], shade(top, 0.86), 0.5, 0.45)
+    }
     const offsets = monitors === 2 ? [-0.27, 0.27] : [0]
     for (const dx of offsets) {
       box(g, x + dx, z - 0.2, 0.06, 0.06, 0.75, 0.12, 0x2a2d33, { outline: null })
@@ -565,6 +704,7 @@ export function buildOffice(): OfficeArt {
     const g = piece(x, z)
     const w = along === 'x' ? len : 0.82
     const d = along === 'x' ? 0.82 : len
+    shadow(g, x, z, w, d, 0.3)
     const sx = Math.round(Math.sin(facing))
     const sz = Math.round(Math.cos(facing))
     const bx = x - sx * 0.31
@@ -609,12 +749,14 @@ export function buildOffice(): OfficeArt {
     const g = piece(x, z)
     const w = along === 'x' ? len : 0.42
     const d = along === 'x' ? 0.42 : len
+    shadow(g, x, z, w, d, 0.26)
     box(g, x, z, w * 0.9, d * 0.9, 0, 0.38, 0x3b3f46, { outline: null })
     box(g, x, z, w, d, 0.38, 0.07, K.walnutTop)
   }
 
   function dispenser(x: number, z: number) {
     const g = piece(x, z)
+    shadow(g, x, z, 0.32, 0.32, 0.28)
     box(g, x, z, 0.32, 0.32, 0, 0.95, 0xe8ecef)
     box(g, x, z, 0.24, 0.24, 0.95, 0.36, 0x8fc9ef, { alpha: 0.75 })
   }
@@ -629,6 +771,7 @@ export function buildOffice(): OfficeArt {
 
   function bookshelf(x: number, z: number, w: number, plane: 'x' | 'z' = 'z') {
     const g = piece(x, z)
+    shadow(g, x, z, plane === 'z' ? w : 0.3, plane === 'z' ? 0.3 : w, 0.4, 0.12)
     const rnd = rng(Math.round(x * 13 + z * 7))
     if (plane === 'z') {
       box(g, x, z, w, 0.3, 0, 1.8, K.walnut)
@@ -658,6 +801,7 @@ export function buildOffice(): OfficeArt {
   /** Free-standing board facing +z: a sticky-note kanban or a chart. */
   function board(x: number, z: number, w: number, kind: 'sticky' | 'chart') {
     const g = piece(x, z)
+    shadow(g, x, z, w, 0.08, 0.3, 0.1)
     for (const e of [-1, 1]) box(g, x + e * (w / 2 - 0.04), z, 0.05, 0.05, 0, 0.85, 0x5f6670, { outline: null })
     wallZ(g, z, x - w / 2, x + w / 2, 0.8, 1.85, 0xd3d8dd)
     wallZ(g, z + 0.005, x - w / 2 + 0.05, x + w / 2 - 0.05, 0.85, 1.8, 0xfbfbf8)
@@ -715,6 +859,7 @@ export function buildOffice(): OfficeArt {
     const a = new Graphics()
     const b = new Graphics()
     const rnd = rng(Math.round(x * 11 + z * 5))
+    shadow(g, x, z, plane === 'z' ? 0.62 : 0.9, plane === 'z' ? 0.9 : 0.62, 0.5, 0.2)
     if (plane === 'z') {
       box(g, x, z, 0.62, 0.9, 0, 2.05, 0x232830)
       for (let y = 0.25; y < 1.95; y += 0.21) {

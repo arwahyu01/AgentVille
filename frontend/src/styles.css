@@ -274,3 +274,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .claude-events li { display: grid; grid-template-columns: auto auto 1fr; gap: 7px; align-items: baseline; }
 .claude-events time { color: #7f97a3; font-variant-numeric: tabular-nums; font-size: 10px; }
 .claude-kind { color: #f0b49c; font-size: 9px; text-transform: uppercase; letter-spacing: .6px; }
+
+/* Soft vignette: keeps the eye on the middle of the floor plate without hiding anything. */
+.office-canvas.iso::after { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 1;
+  background: radial-gradient(ellipse at 50% 46%, transparent 52%, rgba(4, 8, 16, .5) 100%); }

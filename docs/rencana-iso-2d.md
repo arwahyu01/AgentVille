@@ -146,13 +146,17 @@ orang: apa yang sedang dibaca/ditulis/dijalankan, dan ke mana ia pergi.
 | `action_write` / `action_run` | Mengetik, bubble + ikon, layar meja berwarna | **Selesai** |
 | `action_read` / `action_search` | Tidak mengetik, bubble + ikon, layar biru/kuning | **Selesai** |
 | `meeting_started` (QC) | Duduk di ruang rapat, topik di layar | Sudah ada |
-| `handoff_*` | Berjalan ke meja rekan **membawa dokumen** | Berjalan antar ruangan sudah ada; "membawa dokumen" belum |
-| QC gagal | Reviewer **mendatangi pemilik langkah** | Belum |
-| Langkah selesai | **Bersantai di pantry** setelah jeda (agen AgentVille) | Belum (baru untuk sesi Claude) |
+| `handoff_requested` | Berjalan ke meja penerima membawa dokumen, bubble "Serah terima ke …", lalu kembali | **Selesai** |
+| QC gagal (`review_visit`) | Reviewer mendatangi meja pemilik langkah dengan bubble temuan; pemilik kembali ke mejanya untuk revisi | **Selesai** |
+| Tugas terakhir selesai | Ke pantry 20 detik–5 menit setelah selesai, lalu kembali ke meja | **Selesai** (tes unit; belum dilihat di browser) |
 | Sesi Claude `waiting` | Berdiri di meja dengan "!" | Sudah ada |
 
-- [ ] Sisa tabel: membawa dokumen saat serah terima, Reviewer mendatangi pemilik langkah, agen
-      selesai bersantai di pantry.
+- [x] Sisa tabel dikerjakan: `frontend/src/features/iso/errands.ts` (perjalanan singkat diputar
+      ulang dari frame `handoff_requested` / `review_visit` selama 18 detik; istirahat setelah
+      selesai) dan event `review_visit` di orchestrator (`_review_visits`). Backend mencatat serah
+      terima sebagai satu saat, jadi perjalanannya diputar ulang dari frame itu, bukan dikarang.
+      Serah terima dan kunjungan Reviewer diverifikasi di browser dengan dua frame contoh yang
+      disisipkan lalu dihapus; QC gagal yang sesungguhnya belum pernah terjadi dalam run nyata.
 - [ ] Layar monitor menampilkan nama berkas (butuh aset layar dari Fase 2).
 - **Gerbang:** tes lolos dan diverifikasi di browser (sudah untuk yang bertanda Selesai).
 
@@ -163,6 +167,24 @@ Tidak ada pekerjaan tambahan; keputusan K2 tidak diperlukan lagi.
 ---
 
 ## Fase 2 — Ilustrasi ruangan
+
+**Status 2026-11-14 — uji generator dihentikan, dilanjutkan tanpa generator (keputusan K3).**
+- Higgsfield: saldo 0 kredit, tidak bisa dipakai. Gamma: satu gambar uji (meja) memakai 70 kredit
+  (sisa 220) dan gayanya kartun datar bergaris tebal, tidak lebih dekat ke video. Tidak dipasang.
+- [x] **Fase 2a — perhalus gambar dari kode** (`draw.ts`, `officeArt.ts`): gradasi sisi dan tepi
+      terang pada setiap balok, bayangan kontak furnitur, variasi warna papan kayu, ubin dan urat
+      marmer, bayangan dinding, cahaya siang dari jendela, kolam cahaya hangat di bawah lampu,
+      lampu gantung, pantulan diagonal pada kaca, tepi karpet. Diverifikasi di browser
+      (`docs/screenshots/iso2d_polish_*.{png,jpg}`).
+- [x] **Fase 2b** (putaran kedua): dinding padat punya papan bawah, tepi atas terang, dan sambungan
+      panel; tirai gulung setengah turun di jendela belakang; jalur antrean Customer Service
+      (tiang + pita, panah lantai, garis berhenti, kios nomor antrean); bayangan untuk rak buku,
+      bangku, dispenser, papan; vinyet lembut di tepi kanvas.
+      Performa: 60 FPS sebelum dan sesudah, diukur di pane browser yang sama (Semua / Customer
+      Service / Development). Satu angka 4 FPS sempat terukur sesaat setelah tangkapan layar dan
+      tidak terulang pada tiga pengukuran ulang.
+- [ ] Atlas sprite di bawah ini tetap menjadi jalur menuju kualitas lukisan; butuh kredit
+      generator (Higgsfield ±10–15 kredit) atau ilustrator.
 
 **Hasil akhir:** tampilan sekelas video: lantai kayu/marmer, dinding kaca dengan kota, furnitur
 dengan bayangan dan cahaya hangat.
@@ -189,33 +211,102 @@ ruangan berupa satu gambar utuh.
 
 ---
 
-## Fase 3 — Avatar sprite
+## Fase 3 — Avatar dan pose
 
-**Hasil akhir:** karakter chibi yang lebih kaya, tetap deterministik per agen.
+**Hasil akhir:** karakter chibi dengan pose yang punya sebab nyata, tetap deterministik per agen.
 
-- [ ] Rig boneka berlapis (kepala, torso, lengan, kaki) dengan lapisan yang bisa diwarnai
-      (kulit, rambut, baju) supaya 14 agen + staf + sesi Claude memakai aset yang sama.
-- [ ] Pose baru: duduk-mengetik (ada), berdiri, jalan (ada), bicara, presentasi di layar dinding,
-      membawa dokumen, santai/minum kopi, menunjuk.
-- [ ] Arah: depan dan belakang dengan cermin kiri-kanan (sudah dipakai `facingView`).
-- [ ] Label nama + kode tugas dan balon tetap terbaca di semua ukuran penggeser.
-- [ ] Sesi Claude: baju oranye `#d97757` tetap menjadi pembeda.
-- **Gerbang:** tes pemilihan pose per status; tangkapan layar tiap pose; hit area klik tetap pas.
+**Status 2026-11-14 — pose selesai; atlas sprite bergambar ditunda** (butuh kredit generator, lihat
+Fase 2). Avatar masih digambar dari kode: kepala, torso, dua lengan, dua kaki, dengan warna kulit,
+rambut, dan baju dari id + peran (baju oranye untuk sesi Claude).
+
+- [x] Modul murni `frontend/src/features/iso/poses.ts` (`gestureFor`, `isPresenter`,
+      `presenterGoal`, `isBreakGoal`) dengan tes. Setiap gestur punya satu sebab:
+
+| Pose | Sebab nyata | Prioritas |
+|---|---|---|
+| Menunjuk layar (berdiri di samping layar rapat) | Coordinator dipanggil ke ruang rapat karena rencana menunggu persetujuan | 1 |
+| Melambai | Sesi Claude `waiting` (menunggu izin) atau sapaan sosial lokal | 2 |
+| Mengetik | Status `working` + aksi tulis/jalankan (sudah ada) | 3 |
+| Minum kopi (cangkir terangkat bergantian) | Istirahat di pantry: tugas terakhir baru selesai, atau sesi Claude selesai dan diam | 4 |
+| Membaca (kepala menunduk, buku di dada) | Duduk dengan aksi `read` / `search` / `think` yang masih segar | 5 |
+| Membawa kertas | Perjalanan serah terima (sudah ada) | — |
+| Mulut bergerak | Sedang berbicara (obrolan sosial lokal) | — |
+
+- [x] Avatar (`avatar.ts`): lengan berupa `Container` (PixiJS 8 melarang anak pada `Graphics`),
+      cangkir di tangan kanan, buku, mulut terbuka. Lengan yang menunjuk dipilih menurut arah
+      cermin supaya selalu mengarah ke layar.
+- [x] Layar rapat sekarang membaca topik juga dari riwayat tim dan dikosongkan saat rapat
+      berakhir, jadi halaman yang dibuka di tengah rapat tidak menulis "belum ada agenda".
+- [x] Diverifikasi di browser dengan keadaan nyata: rencana yang menunggu persetujuan (Coordinator
+      presentasi), sesi Claude yang menunggu izin, dan sesi yang selesai lama (minum kopi); rapat
+      bubar langsung saat rencana dibatalkan. Data uji dihapus. Lambaian sesi Claude hanya terlihat
+      kecil dari belakang; belum ada tangkapan khusus yang jelas.
+- [ ] Atlas sprite bergambar (pose duduk-mengetik, berdiri, jalan, bicara, presentasi, membawa
+      dokumen, santai, menunjuk) menunggu keputusan sumber aset.
+- **Gerbang:** tes pemilihan pose lulus; tangkapan layar per pose utama
+      (`docs/screenshots/iso2d_fase3_*.png`); hit area klik tetap pas.
 
 ---
 
-## Fase 5 — Verifikasi
+## Fase 5 — Verifikasi (2026-11-14)
 
-- [ ] Skenario tetap: "buatkan landing page restoran". Tangkapan layar per event kunci (rencana
-      diajukan, menunggu approval, langkah berjalan, serah terima, QC, selesai) di
-      `docs/screenshots/`.
-- [ ] Bandingkan berdampingan dengan frame video; catat selisih yang disengaja.
-- [ ] Jalankan skenario dengan provider Claude **dan** tanpa event aksi (provider lain) untuk
-      memastikan degradasi tetap rapi.
-- [ ] Cek: konsol bersih, tidak ada gerak tanpa event, 3D tidak rusak, ponsel 375 px,
-      `prefers-reduced-motion`.
-- **Gerbang:** `npm run test`, `npm run lint`, `npm run build`, `pytest` (satu kegagalan
-  macOS yang sudah dikenal dicatat), serta tangkapan layar terlampir.
+Skenario tetap: "landing page restoran Warung Sari Rasa" (satu `index.html`, tiga menu, jam buka,
+tombol WhatsApp), provider Claude (`sonnet`), dijalankan sungguhan dari request sampai selesai.
+
+**Garis waktu** (dari jurnal): request 18:18:51 → rencana v1 diajukan 18:19:05 (14 dtk) → disetujui
+18:19:29 → Ink (desain) → serah terima ke Blaze 18:20:02 → Blaze `action_write` / `action_write`
+18:20:20 / 18:20:22 → serah terima ke Gauge 18:20:30 → Gauge `action_read` / `action_run`
+18:20:32 / 18:20:40 → rapat QC 18:20:51 → QC lulus, selesai 18:21:18 (1 mnt 49 dtk dari persetujuan).
+Hasil: `index.html` valid dan QC `pass`.
+
+| Momen | Yang terlihat | Tangkapan |
+|---|---|---|
+| Rencana menunggu persetujuan | Coordinator berdiri di samping layar, tim lain duduk, layar menulis judul rencana, "!" | `fase5/1_rapat_rencana.png` |
+| Penugasan | Blaze dan Gauge bertanda "!" (menunggu giliran) dengan bubble "Assigned to step …" | `fase5/2_penugasan.png` |
+| Langkah 1 | Blaze mengetik dengan bubble "Tulis index.html"; Ink mengantar hasil desain ("Serah terima ke Blaze") | `fase5/3_aksi_dan_serah_terima.png` |
+| Langkah 2 | Blaze mengantar ke Gauge; Gauge bubble "Terminal: python3 -I" | `fase5/4_serah_terima_qa.png` |
+| Rapat QC | Peserta ke ruang rapat, layar menulis topik request | `fase5/5_rapat_qc.png` |
+| Setelah selesai | Atlas, Ink, Blaze, Gauge istirahat di pantry pada titik yang berbeda | `fase5/6_istirahat_pantry.png` |
+| Ponsel 375 px | Tanpa gulir horizontal, 14 agen tergambar | `fase5/7_ponsel_375.jpg` |
+
+Perbandingan berdampingan dengan frame video: `fase5/banding_video.png`.
+
+**Selisih yang disengaja terhadap video:** ilustrasi masih digambar dari kode (video: lukisan
+detail); hanya sepuluh ruangan (video: ada kolam, gaming, studio, masjid, K4); avatar belum sprite
+bergambar; tidak ada panel samping "Agen" selain penggeser ukuran.
+
+**Pemeriksaan:**
+- [x] Konsol tanpa galat selama seluruh skenario dan perpindahan 2D ↔ 3D.
+- [x] 3D tetap berfungsi dan pilihan agen terbawa; kembali ke 2D memuat 14 agen.
+- [x] Tidak ada gerak tanpa event: rapat hanya saat ada `meeting_started`, aksi hanya dari
+      `action_*`, serah terima dan kunjungan Reviewer hanya dari frame, istirahat hanya setelah
+      tugas selesai.
+- [x] `prefers-reduced-motion`: sebelumnya diabaikan sama sekali oleh tampilan 2D; sekarang napas,
+      kibasan tangan, mulut, kedipan LED, dan easing kamera dimatikan. Diverifikasi di browser
+      (LED stabil bernilai 1 saat diaktifkan, kembali berkedip saat dilepas).
+- [x] Titik istirahat di pantry: dulu dua agen bisa memakai titik yang sama (id 1 dan 9); sekarang
+      16 titik dengan tes unik/di dalam pantry/berjarak ≥ 0,6 m.
+- [x] Degradasi tanpa event aksi: tes backend (`provider yang tidak memanggil hook tidak mengubah
+      jurnal`) dan frontend (`actionFor` bernilai null). **Belum dijalankan dengan provider
+      opencode atau qodercli** karena tidak terpasang di mesin ini.
+
+**Temuan pengujian (bukan galat produk):**
+- Jendela Claude di latar belakang membuat Chromium menahan animasi ke ±1 FPS, bahkan untuk
+  halaman kosong. Satu bacaan "4 FPS" dan jalan yang tampak sangat lambat berasal dari sini. Mode
+  `?qa` sekarang mengejar waktu dengan jam dinding supaya pengujian tidak bergantung pada FPS;
+  mode normal tetap membatasi satu frame hingga 50 ms.
+- `localhost:5173` bisa menuju server Vite proyek lain (IPv6) bila dua server berbagi port; pakai
+  `http://127.0.0.1:5173`.
+- Jendela istirahat (20 dtk–5 mnt setelah selesai) singkat dibanding laju pengamatan manual; waktu
+  selesai task skenario diperbarui ke "sekarang" di database lokal untuk memotretnya.
+
+**Perilaku yang perlu diperhatikan:** agen yang sedang istirahat masih bisa ditarik obrolan sosial
+lokal (sapaan/mengobrol) lalu kembali istirahat; itu simulasi lokal yang sudah berlabel.
+
+**Gerbang:** `npm run test` (146), `npm run lint` (0 galat, 17 peringatan lama), `npm run build`,
+`pytest` (satu kegagalan macOS yang sudah dikenal).
+
+---
 
 ## Fase 6 — Performa dan perapian
 

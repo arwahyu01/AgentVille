@@ -9,6 +9,7 @@ import EventLog, { pushEvent } from './features/events/EventLog'
 import TeamConversation, { mergeTeam, pushTeam } from './features/events/TeamConversation'
 import { latestByAgent } from './lib/activity'
 import { isActionEvent, latestActionByAgent } from './features/iso/actions'
+import { latestErrandByAgent } from './features/iso/errands'
 import { roomById } from './lib/officeLayout'
 import { useEventStream } from './lib/sse'
 import { api } from './lib/api'
@@ -62,6 +63,7 @@ export default function App() {
   // Newest per-tool `action_*` frame per agent. Kept apart from the journal: those frames are
   // frequent and would push real milestones out of its short window.
   const [actions, setActions] = useState<Record<number, StreamEvent>>({})
+  const [errands, setErrands] = useState<Record<number, StreamEvent>>({})
   const [team, setTeam] = useState<TeamEvent[]>([])
   const [convKey, setConvKey] = useState(0)
   const lastStreamRefresh = useRef(0)
@@ -93,6 +95,7 @@ export default function App() {
       return
     }
     setJournal((current) => pushEvent(current, event))
+    if (event.kind === 'task') setErrands((current) => latestErrandByAgent(current, event))
     if (event.kind === 'task') {
       const agent = agents.find((a) => a.id === event.agentId)
       const task = tasks.find((t) => t.id === event.taskId)
@@ -134,17 +137,18 @@ export default function App() {
   const activeCount = tasks.filter((task) => ['running', 'queued', 'reviewing', 'approved'].includes(task.status)).length
   const completedCount = tasks.filter((task) => task.status === 'completed').length
   const agentActivity = useMemo(() => latestByAgent([...journal, ...Object.values(actions)]), [journal, actions])
+  // The meeting screen shows the topic of the newest meeting that has not ended. Both the live
+  // journal and the loaded team history are read, so a page opened mid-meeting still has it.
   const meetingTopic = useMemo(() => {
-    let topic: string | undefined
-    let lastMeeting: StreamEvent | undefined
-    for (const event of journal) {
-      if (event.type === 'meeting_started' && (!lastMeeting || event.id > lastMeeting.id)) {
-        lastMeeting = event
-        topic = event.message.replace(/^QC meeting:\s*/i, '').slice(0, 40)
-      }
+    let last: { id: number; type: string; message: string } | undefined
+    const consider = (id: number, type: string, message: string) => {
+      if ((type === 'meeting_started' || type === 'meeting_ended') && (!last || id > last.id)) last = { id, type, message }
     }
-    return topic
-  }, [journal])
+    for (const event of journal) consider(event.id, event.type, event.message)
+    for (const event of team) consider(event.id, event.event_type, event.message)
+    if (!last || last.type === 'meeting_ended') return undefined
+    return (last as { message: string }).message.replace(/^QC meeting:\s*/i, '').slice(0, 40)
+  }, [journal, team])
   const selectedAgentData = agents.find((agent) => agent.id === selectedAgent)
   const selectedTaskData = tasks.find((task) => task.id === selectedTask)
   const conversationData = conversations.find((conv) => conv.id === selectedConversation) ?? null
@@ -324,7 +328,7 @@ export default function App() {
               <div><h2>Office Floor</h2><p>2D / 3D workspace · Select an agent to inspect</p></div>
               <span className="panel-tag"><span className="live-dot"/> LIVE VIEW</span>
             </div>
-            <OfficeScene agents={agents} tasks={tasks} selectedId={selectedAgent} onSelect={setSelectedAgent} activity={agentActivity} meetingTopic={meetingTopic} />
+            <OfficeScene agents={agents} tasks={tasks} selectedId={selectedAgent} onSelect={setSelectedAgent} activity={agentActivity} errands={errands} meetingTopic={meetingTopic} />
             <div className="office-footer">
               <div className="legend"><span className="legend-dot working"/> Working <span className="legend-dot waiting"/> Waiting <span className="legend-dot reviewing"/> Reviewing <span className="legend-dot idle"/> Idle <span className="legend-dot completed"/> Completed <span className="legend-dot failed"/> Failed</div>
               <span>{agents.length} workstations registered</span>

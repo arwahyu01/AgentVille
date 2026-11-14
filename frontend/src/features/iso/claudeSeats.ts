@@ -16,8 +16,11 @@ export const BREAK_AFTER_MS = 3 * 60_000
 /** A finished turn keeps its "Selesai: …" bubble this long. */
 export const DONE_BUBBLE_MS = 20_000
 
+/** Standing spots in the pantry, clear of the tables, stools and counter. Claude sessions take them
+ *  from the first; agents on break take them from the last, so the two rarely meet. */
 export const PANTRY_SPOTS: [number, number][] = [
   [9.85, 5.05], [11.25, 5.35], [10.15, 6.45], [11.55, 6.55], [9.75, 3.15], [11.85, 3.25], [10.9, 8.2], [9.7, 7.9],
+  [9.5, 4.2], [11.2, 4.2], [10.4, 2.6], [11.4, 2.4], [9.5, 6.0], [11.2, 7.5], [10.4, 8.7], [11.5, 8.6],
 ]
 export const CORRIDOR_SPOTS: [number, number][] = [
   [-4.2, 0.55], [-2.2, -0.55], [1.2, 0.55], [3.0, -0.55], [5.0, 0.55], [-8.0, -0.55], [8.6, 0.55], [-10.0, 0.55],

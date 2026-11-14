@@ -610,3 +610,51 @@ def test_a_provider_that_never_calls_the_hook_leaves_the_journal_unchanged(conv_
     assert state(conv_db, anchor_id) == "completed"
     with conv_db() as db:
         assert db.query(TaskEvent).filter(TaskEvent.event_type.like("action\\_%", escape="\\")).count() == 0
+
+
+# -- reviewer visit after a failed QC ---------------------------------------------
+
+
+def test_failed_qc_sends_the_reviewer_to_the_step_owner(conv_db):
+    from app.models import Agent, TaskEvent
+    with conv_db() as db:
+        set_setting(db, "ai_retry_max", "1")
+        db.add(Agent(name="Sage", role="Researcher", status="idle", position_x=0, position_z=0))
+        db.add(Agent(name="Quill", role="Administrator", status="idle", position_x=0, position_z=0))
+        db.add(Agent(name="Proof", role="Reviewer", status="idle", position_x=0, position_z=0))
+        db.commit()
+    conv_id, anchor_id = drive_to_approval(conv_db)
+    tick.provider = FakeProvider([
+        ProviderResult(ok=True, text="Numbers: 42 rows"),
+        ProviderResult(ok=True, text="fluffy summary"),
+        qc_fail(findings="summary lacks the numbers token=abc123"),
+        ProviderResult(ok=True, text="summary with 42 rows"),
+        QC_PASS,
+    ])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        by_name = {a.name: a for a in db.query(Agent).all()}
+        [visit] = db.query(TaskEvent).filter(TaskEvent.event_type == "review_visit").all()
+        assert visit.actor_agent_id == by_name["Proof"].id and visit.agent_id == by_name["Proof"].id
+        assert visit.recipient_agent_id == by_name["Quill"].id   # owner of failed step 1
+        assert visit.to_room == "admin" and visit.step_index == 1 and visit.conversation_id == conv_id
+        assert "summary lacks the numbers" in visit.message and "abc123" not in visit.message
+        # nobody is left parked in the meeting room once QC passes
+        assert all(a.target_room != "meeting" for a in by_name.values())
+
+
+def test_no_reviewer_on_the_roster_means_no_visit_is_announced(conv_db):
+    from app.models import Agent, TaskEvent
+    with conv_db() as db:
+        set_setting(db, "ai_retry_max", "1")
+        db.add(Agent(name="Quill", role="Administrator", status="idle", position_x=0, position_z=0))
+        db.commit()
+    _conv_id, anchor_id = drive_to_approval(conv_db)
+    tick.provider = FakeProvider([
+        ProviderResult(ok=True, text="Numbers: 42 rows"), ProviderResult(ok=True, text="fluffy"),
+        QC_FAIL, ProviderResult(ok=True, text="better"), QC_PASS])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        assert db.query(TaskEvent).filter(TaskEvent.event_type == "review_visit").count() == 0

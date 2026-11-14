@@ -4,6 +4,7 @@ import { Container, Graphics, Rectangle, Text } from 'pixi.js'
 import { HAIR, ROLE_SHIRT, SKIN, STATUS_DOT, TROUSERS, UNIFORM } from '../office/palette'
 import type { Agent } from '../../types'
 import type { ActionKind } from './actions'
+import type { Gesture } from './poses'
 import { hex, shade } from './draw'
 
 export interface AvatarLook {
@@ -69,6 +70,10 @@ export interface PoseInput {
   phase: number
   typing: boolean
   talking: boolean
+  /** Optional gesture decided by `gestureFor`; ignored while walking. */
+  gesture?: Gesture
+  /** prefers-reduced-motion: no idle breathing, hand flapping, mouth flapping or arm sway. */
+  calm?: boolean
 }
 
 export class Avatar {
@@ -79,8 +84,14 @@ export class Avatar {
   private readonly legL = new Graphics()
   private readonly legR = new Graphics()
   private readonly torso = new Container()
-  private readonly armL = new Graphics()
-  private readonly armR = new Graphics()
+  // Arms are containers (pivot at the shoulder) so the right one can also carry the mug;
+  // PixiJS 8 leaf nodes such as Graphics cannot have children.
+  private readonly armL = new Container()
+  private readonly armR = new Container()
+  private readonly paper = new Graphics()
+  private readonly book = new Graphics()
+  private readonly cup = new Graphics()
+  private readonly mouth = new Graphics()
   private readonly body = new Graphics()
   private readonly headFront = new Container()
   private readonly headBack = new Container()
@@ -98,6 +109,7 @@ export class Avatar {
   private size = 1
   private lastLabel = ''
   private lastBubble = ''
+  private carrying = false
   private lastAlert: AlertKind = null
   private lastRing = ''
 
@@ -113,14 +125,37 @@ export class Avatar {
     this.body.roundRect(-7.5, -11.5, 15, 3, 1.5).fill(shade(look.trousers, 0.9))
     this.body.moveTo(-3, -23.5).lineTo(0, -20).lineTo(3, -23.5).stroke({ color: shade(look.shirt, 0.72), width: 1.1 })
     for (const [arm, x] of [[this.armL, -8.6], [this.armR, 8.6]] as const) {
-      arm.roundRect(-2, 0, 4, 10.5, 2).fill(shade(look.shirt, 0.88))
-      arm.circle(0, 11.2, 2.1).fill(look.skin)
+      const limb = new Graphics()
+      limb.roundRect(-2, 0, 4, 10.5, 2).fill(shade(look.shirt, 0.88))
+      limb.circle(0, 11.2, 2.1).fill(look.skin)
+      arm.addChild(limb)
       arm.position.set(x, -22.5)
     }
-    this.torso.addChild(this.armL, this.body, this.armR)
+    // A sheet of paper held in front of the chest, shown only during a real handoff trip.
+    this.paper.roundRect(2.5, -19, 7, 8.5, 0.8).fill(0xfdfbf4).stroke({ color: 0x9aa3ad, width: 0.5 })
+    for (const y of [-17, -15.2, -13.4]) this.paper.rect(3.7, y, 4.6, 0.6).fill(0x9fb4c8)
+    this.paper.visible = false
+    // An open book held at the chest while reading.
+    this.book.roundRect(-5, -19.5, 4.6, 6, 0.6).fill(0xf4efe2).stroke({ color: 0x7a6a50, width: 0.5 })
+    this.book.roundRect(0.4, -19.5, 4.6, 6, 0.6).fill(0xfbf7ec).stroke({ color: 0x7a6a50, width: 0.5 })
+    for (const y of [-18, -16.4, -14.8]) {
+      this.book.rect(-4.1, y, 2.9, 0.5).fill(0x9fb4c8)
+      this.book.rect(1.2, y, 2.9, 0.5).fill(0x9fb4c8)
+    }
+    this.book.visible = false
+    // A mug in the right hand, shown only on a break.
+    this.cup.roundRect(-2.1, 9.4, 4.2, 4.6, 0.9).fill(0xfafafa).stroke({ color: 0xb9c0c8, width: 0.4 })
+    this.cup.rect(-1.7, 9.8, 3.4, 1.2).fill(0x7a4a2e)
+    this.cup.circle(2.4, 11.8, 1.2).stroke({ color: 0xfafafa, width: 0.7 })
+    this.cup.visible = false
+    this.armR.addChild(this.cup)
+    this.torso.addChild(this.armL, this.body, this.armR, this.paper, this.book)
 
     this.buildHead(this.headFront, look, true)
     this.buildHead(this.headBack, look, false)
+    this.mouth.ellipse(0, -27.3, 1.7, 1.2).fill(0x5a2a26)
+    this.mouth.visible = false
+    this.headFront.addChild(this.mouth)
     this.figure.addChild(this.legL, this.legR, this.torso, this.headFront, this.headBack)
 
     this.nameText = new Text({ text: '', resolution: TEXT_RES, style: { fontFamily: FONT, fontSize: 7, fontWeight: '700', fill: 0xffffff } })
@@ -212,10 +247,13 @@ export class Avatar {
     this.figure.scale.x = (p.flip ? -1 : 1) * k
     this.headFront.visible = p.front
     this.headBack.visible = !p.front
+    // Held in front of the chest, so it is hidden when the figure is seen from behind.
+    this.paper.visible = this.carrying && p.front
     // Arms sit behind the body when seen from the back so the shirt reads as the back.
     this.torso.setChildIndex(this.body, p.front ? 0 : 2)
     const walk = p.moving ? Math.sin(p.phase) : 0
-    const bob = p.moving ? Math.abs(Math.sin(p.phase)) * 1.3 : Math.sin(p.phase * 0.5) * 0.35
+    const calm = !!p.calm
+    const bob = calm ? 0 : p.moving ? Math.abs(Math.sin(p.phase)) * 1.3 : Math.sin(p.phase * 0.5) * 0.35
     const drop = p.sit * 3.5
     this.legL.y = walk * 1.6
     this.legR.y = -walk * 1.6
@@ -233,14 +271,38 @@ export class Avatar {
     let liftL = 0
     let liftR = 0
     if (p.typing) {
-      const j = Math.sin(p.phase * 3.1) * 0.9
+      const j = calm ? 0 : Math.sin(p.phase * 3.1) * 0.9
       liftL = -2.5 + j
       liftR = -2.5 - j
       swingL = 0.5
       swingR = -0.5
     } else if (p.talking && !p.moving) {
-      swingR = -0.6 + Math.sin(p.phase * 2.2) * 0.25
+      swingR = -0.6 + (calm ? 0 : Math.sin(p.phase * 2.2) * 0.25)
+      swingL = 0.18 + (calm ? 0 : Math.sin(p.phase * 1.7 + 1) * 0.12)
     }
+    // Gestures. Angles are local to the arm's shoulder pivot: a negative angle swings the right
+    // arm outward and up, a positive one the left arm.
+    const g: Gesture = p.moving || p.typing ? 'none' : (p.gesture ?? 'none')
+    let dip = 0
+    if (g === 'wave') {
+      swingR = -2.5 + (calm ? 0 : Math.sin(p.phase * 7) * 0.28)
+    } else if (g === 'point') {
+      // Reach back toward the screen: the arm on the figure's screen-left side.
+      const sway = calm ? 0 : Math.sin(p.phase * 1.3) * 0.08
+      if (p.flip) swingR = -2.0 + sway
+      else swingL = 2.0 - sway
+    } else if (g === 'sip') {
+      // Raise the mug for part of each cycle, rest it at the side for the rest.
+      const up = !calm && Math.sin(p.phase * 0.9) > 0.15
+      swingR = up ? -2.95 : -0.2
+    } else if (g === 'read') {
+      dip = 1.3 + (calm ? 0 : Math.sin(p.phase * 0.6) * 0.4)
+    }
+    this.cup.visible = g === 'sip'
+    this.book.visible = g === 'read' && p.front
+    this.mouth.visible = !calm && p.talking && p.front && Math.sin(p.phase * 9) > 0
+    this.headFront.y += dip
+    this.headBack.y += dip
     this.armL.rotation = swingL
     this.armR.rotation = swingR
     this.armL.y = -22.5 + liftL
@@ -298,6 +360,11 @@ export class Avatar {
       this.bubbleBg.rect(x0 + 5, -h + 3, 1.6, h - 6).fill(0x9bd8cd)
     }
     this.bubbleText.position.set(x0 + 5 + glyph + 3, -h / 2)
+  }
+
+  setCarrying(carrying: boolean) {
+    this.carrying = carrying
+    this.paper.visible = carrying && this.headFront.visible
   }
 
   setAlert(kind: AlertKind) {
