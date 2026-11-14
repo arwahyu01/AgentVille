@@ -221,6 +221,9 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
       setReady(true)
 
       ro = new ResizeObserver(() => {
+        // `resizeTo` only follows window resizes; the panel also changes size on its own (full
+        // screen, the responsive layout), so the renderer is resized here as well.
+        app.resize()
         camera.current.target = framing(camera.current.focus, el.clientWidth, el.clientHeight)
       })
       ro.observe(el)

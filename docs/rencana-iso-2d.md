@@ -308,6 +308,22 @@ lokal (sapaan/mengobrol) lalu kembali istirahat; itu simulasi lokal yang sudah b
 
 ---
 
+## Tambahan — Layar penuh (2026-11-14)
+- [x] `frontend/src/features/office/useFullscreen.ts` + tombol ⛶ dan pintasan **F** di `OfficeScene`,
+      untuk 2D dan 3D. Fullscreen API pada panel (dialog dan kontrol ikut), cadangan overlay
+      `expanded` bila API tidak ada atau ditolak, `Esc` keluar, gulir halaman dikunci selama
+      overlay. Tes: `useFullscreen.test.ts`.
+- [x] Perbaikan ikutan: kanvas PixiJS sebelumnya hanya mengikuti ukuran *jendela*; sekarang
+      `app.resize()` dipanggil dari `ResizeObserver` panel, sehingga perubahan ukuran panel
+      (layar penuh, tata letak responsif) ikut.
+- [x] Diverifikasi di browser: overlay 1440×1000 dengan kanvas ikut membesar, `Esc`, `F`, F saat
+      mengetik dan Ctrl+F diabaikan, 3D layar penuh, ponsel 375 px. **API fullscreen asli ditolak
+      di pane pengujian ini (`TypeError`)**, jadi yang teruji adalah jalur cadangan; jalur asli hanya
+      lolos tes unit dan belum dicoba di browser biasa.
+- Tangkapan: `docs/screenshots/iso2d_fullscreen.jpg`.
+
+---
+
 ## Fase 6 — Performa dan perapian
 
 - [ ] FPS dan jumlah draw call di 2D saat 14 agen + 4 sesi Claude; target mulus di laptop

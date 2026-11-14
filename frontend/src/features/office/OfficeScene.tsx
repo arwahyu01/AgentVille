@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState, type PointerEvent
 import * as THREE from 'three'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
-import { X } from 'lucide-react'
+import { Maximize2, Minimize2, X } from 'lucide-react'
 import { poseFor, stationSlots, taskOfAgent, workBrief, type WorkBrief } from '../../lib/activity'
 import { ENTRANCE, ROOMS, ROOM_ORDER, roomById } from '../../lib/officeLayout'
 import { CAMPUS_VIEW } from '../../lib/campusLayout'
@@ -14,6 +14,7 @@ import { CorridorProps, RoomFitout } from './RoomFitout'
 import { CharacterChat, type CharacterAiMeta } from './CharacterChat'
 import { STAFF_INTRO, STAFF_SUGGESTIONS, answerStaff, type StaffVariant } from './staffScript'
 import { useSocialLife } from './useSocialLife'
+import { isTypingTarget, useFullscreen } from './useFullscreen'
 import { Ceiling, DoorLight, EntrancePortal, Floors, OfficeShell, Signage, Walls } from './Structure'
 import type { Agent, StreamEvent, Task } from '../../types'
 
@@ -201,6 +202,19 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
   const [nearEntrance, setNearEntrance] = useState(false)
   const [staffTalk, setStaffTalk] = useState<StaffVariant | null>(null)
   const [renderer, setRenderer] = useState<Renderer>(readRenderer)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const fullscreen = useFullscreen(boxRef)
+  // `F` toggles full screen from anywhere on the office view, except while typing.
+  const toggleFullscreen = fullscreen.toggle
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'f' || e.ctrlKey || e.metaKey || e.altKey || isTypingTarget(e.target)) return
+      e.preventDefault()
+      toggleFullscreen()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [toggleFullscreen])
   useEffect(() => {
     try { window.localStorage.setItem(RENDERER_KEY, renderer) } catch { /* private mode */ }
   }, [renderer])
@@ -244,6 +258,12 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
     <div className="renderer-switch" role="group" aria-label="Renderer">
       <button type="button" className={renderer === '2d' ? 'active' : ''} onClick={() => setRenderer('2d')}>2D</button>
       <button type="button" className={renderer === '3d' ? 'active' : ''} onClick={() => setRenderer('3d')}>3D</button>
+      <button
+        type="button" className="fs" onClick={fullscreen.toggle}
+        aria-pressed={fullscreen.active}
+        aria-label={fullscreen.active ? 'Keluar layar penuh' : 'Layar penuh'}
+        title={fullscreen.active ? 'Keluar layar penuh (F / Esc)' : 'Layar penuh (F)'}
+      >{fullscreen.active ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
     </div>
   )
 
@@ -273,7 +293,7 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
 
   if (renderer === '2d') {
     return (
-      <div className={`office-canvas iso${selected || staffTalk ? ' has-dialog' : ''}`} id="office-canvas" data-mode="2d" data-qa={qa ? '1' : '0'}>
+      <div ref={boxRef} className={`office-canvas iso${selected || staffTalk ? ' has-dialog' : ''}${fullscreen.overlay ? ' expanded' : ''}`} id="office-canvas" data-mode="2d" data-qa={qa ? '1' : '0'} data-fullscreen={fullscreen.active ? '1' : '0'}>
         <Suspense fallback={<div className="iso-loading">Memuat kantor 2D…</div>}>
           <IsoOffice
             agents={agents}
@@ -295,7 +315,7 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
   }
 
   return (
-    <div className={`office-canvas ${mode}${selected || staffTalk ? ' has-dialog' : ''}`} id="office-canvas" data-mode={mode} data-qa={qa ? '1' : '0'}>
+    <div ref={boxRef} className={`office-canvas ${mode}${selected || staffTalk ? ' has-dialog' : ''}${fullscreen.overlay ? ' expanded' : ''}`} id="office-canvas" data-mode={mode} data-qa={qa ? '1' : '0'} data-fullscreen={fullscreen.active ? '1' : '0'}>
       {rendererSwitch}
       <Canvas
         shadows

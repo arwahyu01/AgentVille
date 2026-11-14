@@ -240,7 +240,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .iso-host { position: absolute; inset: 0; touch-action: none; cursor: grab; }
 .iso-host:active { cursor: grabbing; }
 .iso-host canvas { display: block; }
-.iso-rooms { position: absolute; top: 10px; left: 92px; right: 220px; z-index: 3; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 3px; border-radius: 10px; background: #0d1522cc; border: 1px solid #23324466; backdrop-filter: blur(6px); }
+.iso-rooms { position: absolute; top: 10px; left: 132px; right: 220px; z-index: 3; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 3px; border-radius: 10px; background: #0d1522cc; border: 1px solid #23324466; backdrop-filter: blur(6px); }
 .iso-rooms::-webkit-scrollbar { display: none; }
 .iso-rooms button { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: #c7d2de; font: inherit; font-size: 11px; font-weight: 600; padding: 5px 10px; border-radius: 7px; white-space: nowrap; }
 .iso-rooms button:hover { background: #ffffff12; color: #fff; }
@@ -278,3 +278,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 /* Soft vignette: keeps the eye on the middle of the floor plate without hiding anything. */
 .office-canvas.iso::after { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 1;
   background: radial-gradient(ellipse at 50% 46%, transparent 52%, rgba(4, 8, 16, .5) 100%); }
+
+/* ── Full screen ─────────────────────────────────────────────────────────────── */
+.renderer-switch button.fs { display: grid; place-items: center; padding: 5px 8px; margin-left: 2px; background: #ffffff10; color: #c7d2de; }
+.renderer-switch button.fs:hover { background: #ffffff24; color: #fff; }
+.renderer-switch button.fs[aria-pressed="true"] { background: #f1cf86; color: #2a1e0b; }
+/* The browser's Fullscreen API on the panel, or the in-page fallback (`expanded`) where the API is
+   unavailable. Heights set by the responsive rules above must not win. */
+.office-canvas:fullscreen { width: 100vw; height: 100vh !important; max-height: none; border: 0; border-radius: 0; }
+.office-canvas.expanded { position: fixed; inset: 0; z-index: 1000; width: auto; height: auto !important; max-height: none; border: 0; border-radius: 0; }
+.office-canvas:fullscreen .scene-hint, .office-canvas.expanded .scene-hint { max-width: min(60%, 560px); }
+@media (max-width: 760px) {
+  .iso-rooms { left: 12px; }
+}
