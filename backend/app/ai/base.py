@@ -13,6 +13,10 @@ class Persona:
     model: str | None = None
     mode: MODE = "text"
     workspace: str | None = None
+    # Optional live hook: called as on_action(kind, summary) for each tool call a provider can
+    # observe while it runs (kind in read/write/run/search/think; summary is already redacted).
+    # Providers that cannot stream tool events simply never call it.
+    on_action: Callable[[str, str], None] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass

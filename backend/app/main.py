@@ -7,7 +7,7 @@ from app.database import init_db
 from app.office_ops import OfficeOps
 from app.orchestrator import Orchestrator
 from app.channels import telegram
-from app.api import agents, ai, channels, characters, conversations, events, health, tasks
+from app.api import agents, ai, channels, characters, claude, conversations, events, health, tasks
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -49,3 +49,4 @@ app.include_router(characters.router, prefix="/api")
 app.include_router(events.router, prefix="/api")
 app.include_router(channels.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api")
+app.include_router(claude.router, prefix="/api")

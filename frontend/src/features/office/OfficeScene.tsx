@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import * as THREE from 'three'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
@@ -24,6 +24,17 @@ import type { Agent, StreamEvent, Task } from '../../types'
  *  Agent state, event motion and the renderer are never rebuilt by a mode switch. */
 export type CameraMode = 'campus' | 'office' | 'explore'
 export type Quality = 'high' | 'lean'
+/** `2d` is the painted isometric office (PixiJS); `3d` the original React Three Fiber scene. */
+export type Renderer = '2d' | '3d'
+
+// Loaded on demand so the 3D-only path never downloads PixiJS, and vice versa for Three's scene.
+const IsoOffice = lazy(() => import('../iso/IsoOffice'))
+
+const RENDERER_KEY = 'agentville.renderer'
+
+function readRenderer(): Renderer {
+  try { return window.localStorage.getItem(RENDERER_KEY) === '3d' ? '3d' : '2d' } catch { return '2d' }
+}
 
 interface View {
   pos: [number, number, number]
@@ -187,6 +198,10 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
   const [quality, setQuality] = useState<Quality>('high')
   const [nearEntrance, setNearEntrance] = useState(false)
   const [staffTalk, setStaffTalk] = useState<StaffVariant | null>(null)
+  const [renderer, setRenderer] = useState<Renderer>(readRenderer)
+  useEffect(() => {
+    try { window.localStorage.setItem(RENDERER_KEY, renderer) } catch { /* private mode */ }
+  }, [renderer])
   const pad = useRef<VirtualPad>({ forward: false, back: false, left: false, right: false })
   const supported = useMemo(hasWebGL, [])
   const qa = useMemo(() => {
@@ -223,8 +238,62 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
     onPointerCancel: () => setPad(key, false),
   })
 
+  const rendererSwitch = (
+    <div className="renderer-switch" role="group" aria-label="Renderer">
+      <button type="button" className={renderer === '2d' ? 'active' : ''} onClick={() => setRenderer('2d')}>2D</button>
+      <button type="button" className={renderer === '3d' ? 'active' : ''} onClick={() => setRenderer('3d')}>3D</button>
+    </div>
+  )
+
+  const dialogs = (
+    <>
+      {selected && brief && (
+        <AgentDialog
+          key={selected.id}
+          agent={selected}
+          brief={brief}
+          room={selectedRoom?.label ?? 'On the floor'}
+          target={selected.target_room && selected.target_room !== selected.current_room
+            ? roomById(selected.target_room).label : null}
+          onClose={() => onSelect(null)}
+        />
+      )}
+      {staffTalk && (
+        <StaffDialog
+          key={staffTalk}
+          variant={staffTalk}
+          agents={agents}
+          onClose={() => setStaffTalk(null)}
+        />
+      )}
+    </>
+  )
+
+  if (renderer === '2d') {
+    return (
+      <div className={`office-canvas iso${selected || staffTalk ? ' has-dialog' : ''}`} id="office-canvas" data-mode="2d" data-qa={qa ? '1' : '0'}>
+        <Suspense fallback={<div className="iso-loading">Memuat kantor 2D…</div>}>
+          <IsoOffice
+            agents={agents}
+            tasks={tasks ?? []}
+            selectedId={selectedId}
+            onSelect={(id) => { setStaffTalk(null); onSelect(id) }}
+            onClearSelection={() => { setStaffTalk(null); onSelect(null) }}
+            activity={activity ?? {}}
+            meetingTopic={meetingTopic}
+            onStaffTalk={(variant) => { onSelect(null); setStaffTalk(variant) }}
+            qa={qa}
+          />
+        </Suspense>
+        {rendererSwitch}
+        {dialogs}
+      </div>
+    )
+  }
+
   return (
     <div className={`office-canvas ${mode}${selected || staffTalk ? ' has-dialog' : ''}`} id="office-canvas" data-mode={mode} data-qa={qa ? '1' : '0'}>
+      {rendererSwitch}
       <Canvas
         shadows
         dpr={quality === 'high' ? [1, 1.8] : [1, 1.2]}
@@ -300,26 +369,7 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
       </div>
       <div className="scene-hint">{HINTS[mode]}</div>
 
-      {selected && brief && (
-        <AgentDialog
-          key={selected.id}
-          agent={selected}
-          brief={brief}
-          room={selectedRoom?.label ?? 'On the floor'}
-          target={selected.target_room && selected.target_room !== selected.current_room
-            ? roomById(selected.target_room).label : null}
-          onClose={() => onSelect(null)}
-        />
-      )}
-
-      {staffTalk && (
-        <StaffDialog
-          key={staffTalk}
-          variant={staffTalk}
-          agents={agents}
-          onClose={() => setStaffTalk(null)}
-        />
-      )}
+      {dialogs}
 
       {mode === 'explore' && !staffTalk && !selected && (
         <>

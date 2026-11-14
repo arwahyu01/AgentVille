@@ -173,6 +173,7 @@ DEFAULT_SETTINGS = {
     "ai_timeout_s": "300",
     "ai_provider": "opencode",
     "ai_model_qoder": "Efficient",
+    "ai_model_claude": "sonnet",
     "ai_fallback_enabled": "0",
     "ai_retry_max": "1",
     "workspace_root": "",

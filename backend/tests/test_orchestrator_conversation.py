@@ -548,3 +548,65 @@ def test_provider_is_resolved_from_settings_when_not_injected(conv_db, monkeypat
     orch = Orchestrator()
     orch._provider()
     assert seen == ["qoder"]
+
+
+# -- live action events -----------------------------------------------------------
+
+
+class ActingProvider(FakeProvider):
+    """Calls the persona's live hook like a provider that can see its own tool calls."""
+
+    def __init__(self, responses, actions):
+        super().__init__(responses)
+        self.actions = actions
+
+    def run(self, persona, prompt, timeout_s=300, should_cancel=None):
+        if persona.mode == "coding" and persona.on_action:
+            for kind, summary in self.actions:
+                persona.on_action(kind, summary)
+        return super().run(persona, prompt, timeout_s, should_cancel)
+
+
+def _developer_plan(conv_db):
+    conv_id, anchor_id = start_conversation(conv_db)
+    payload = {"action": "propose", "summary": "code it", "plan": {"steps": [
+        {"title": "Write script", "instruction": "create report.py", "agent_role": "Developer",
+         "depends_on": [], "acceptance_criteria": ["file exists"], "uses_tools": True}]}}
+    tick.provider = FakeProvider([ProviderResult(ok=True, text=json.dumps(payload))])
+    tick(conv_db)
+    with conv_db() as db:
+        conversation_service.approve_plan(db, conv_id, 1)
+    return conv_id, anchor_id
+
+
+def test_tool_calls_become_action_events_attributed_to_the_step_agent(conv_db, client):
+    from app.models import Agent, TaskEvent
+    conv_id, anchor_id = _developer_plan(conv_db)
+    # Three calls in the same instant: the gate keeps the first, so the journal stays readable.
+    tick.provider = ActingProvider(
+        [ProviderResult(ok=True, text="created report.py"), QC_PASS],
+        [("write", "Tulis report.py"), ("read", "Baca data.csv"), ("run", "Terminal: python")])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        byte = db.query(Agent).filter(Agent.role == "Developer").first()
+        actions = db.query(TaskEvent).filter(TaskEvent.event_type.like("action\\_%", escape="\\")).all()
+        assert [(e.event_type, e.message) for e in actions] == [("action_write", "Tulis report.py")]
+        e = actions[0]
+        assert e.agent_id == byte.id and e.step_index == 0 and e.conversation_id == conv_id
+        assert e.provider == "opencode" and e.model == "fake/model"
+    # The transcript feed hides them unless asked; the raw journal keeps them.
+    quiet = client.get("/api/events/team", params={"conversation_id": conv_id}).json()
+    assert all(not ev["event_type"].startswith("action_") for ev in quiet)
+    loud = client.get("/api/events/team", params={"conversation_id": conv_id, "include_actions": "true"}).json()
+    assert any(ev["event_type"] == "action_write" for ev in loud)
+
+
+def test_a_provider_that_never_calls_the_hook_leaves_the_journal_unchanged(conv_db):
+    from app.models import TaskEvent
+    _conv_id, anchor_id = _developer_plan(conv_db)
+    tick.provider = FakeProvider([ProviderResult(ok=True, text="created report.py"), QC_PASS])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        assert db.query(TaskEvent).filter(TaskEvent.event_type.like("action\\_%", escape="\\")).count() == 0

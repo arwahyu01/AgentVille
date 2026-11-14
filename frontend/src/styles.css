@@ -221,3 +221,56 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 @media (max-width: 1120px) { .sidebar { width: 205px; }.main-area { padding: 22px 18px; }.content-grid, .content-grid.office-grid { grid-template-columns: 1fr; }.office-canvas { height: 440px; }.scene-rooms { max-width: 46vw; } }
 @media (max-width: 760px) { .sidebar { width: 60px; padding: 18px 7px; }.brand { padding: 0 3px 25px; }.brand>div:last-child,.workspace-label,.nav-item:not(.active),.nav-item.active { font-size: 0; }.brand strong,.brand span { display: none; }.brand-mark { flex-shrink: 0; }.nav-item { justify-content: center; padding: 12px 0; }.nav-item svg { flex-shrink: 0; }.sidebar .nav-item:not(.active) { display: none; }.sidebar-bottom .connection-card,.user-card { display: none; }.main-area { padding: 18px 12px; }.topbar { align-items: flex-start; flex-direction: column; }.topbar-actions { width: 100%; flex-wrap: wrap; }.system-status { margin-right: auto; }.metrics-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }.metric-card { padding: 12px; }.office-canvas { height: 360px; }.scene-controls { left: 12px; right: 12px; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }.scene-segment { justify-content: center; }.scene-rooms { max-width: 100%; order: 3; flex: 1 1 100%; }.scene-chip.quality { margin-left: auto; }.scene-badge { display: none; }.scene-hint { max-width: calc(100% - 24px); font-size: 8px; }.task-toolbar { flex-wrap: wrap; }.search-field { flex-basis: 100%; }.task-toolbar select { max-width: none; width: 100%; }.app-footer { flex-wrap: wrap; }.status-pill { display: none; } }
+
+/* ── Renderer switch (2D isometric / 3D) ─────────────────────────────────────── */
+.renderer-switch { position: absolute; top: 12px; left: 12px; z-index: 4; display: flex; padding: 2px; gap: 2px; border-radius: 8px; background: #101a26e6; border: 1px solid #2c3d4f; }
+.renderer-switch button { border: 0; background: transparent; color: #9fb0c2; font: inherit; font-size: 10px; font-weight: 700; letter-spacing: .4px; padding: 5px 10px; border-radius: 6px; }
+.renderer-switch button:hover { color: #e6eef6; }
+.renderer-switch button.active { background: #65d4cf; color: #0d2028; }
+.office-canvas:not(.iso) .scene-badge { top: 48px; }
+
+/* ── 2D isometric office ─────────────────────────────────────────────────────── */
+.office-canvas.iso { background: radial-gradient(ellipse at 50% 35%, #1d2c48 0%, #111a2c 55%, #0a0f1a 100%); }
+.office-canvas.iso::before { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .55;
+  background-image: radial-gradient(1px 1px at 12% 18%, #ffffffaa 50%, transparent 51%), radial-gradient(1px 1px at 67% 9%, #ffffff88 50%, transparent 51%),
+    radial-gradient(1px 1px at 83% 64%, #ffffff77 50%, transparent 51%), radial-gradient(1px 1px at 31% 82%, #ffffff66 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 92% 27%, #ffffffaa 50%, transparent 51%), radial-gradient(1px 1px at 6% 58%, #ffffff77 50%, transparent 51%),
+    radial-gradient(1px 1px at 48% 93%, #ffffff66 50%, transparent 51%), radial-gradient(1.5px 1.5px at 22% 40%, #ffffff55 50%, transparent 51%); }
+.iso-office { position: absolute; inset: 0; }
+.iso-host { position: absolute; inset: 0; touch-action: none; cursor: grab; }
+.iso-host:active { cursor: grabbing; }
+.iso-host canvas { display: block; }
+.iso-rooms { position: absolute; top: 10px; left: 92px; right: 220px; z-index: 3; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 3px; border-radius: 10px; background: #0d1522cc; border: 1px solid #23324466; backdrop-filter: blur(6px); }
+.iso-rooms::-webkit-scrollbar { display: none; }
+.iso-rooms button { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: #c7d2de; font: inherit; font-size: 11px; font-weight: 600; padding: 5px 10px; border-radius: 7px; white-space: nowrap; }
+.iso-rooms button:hover { background: #ffffff12; color: #fff; }
+.iso-rooms button.active { background: #f1cf86; color: #2a1e0b; }
+.iso-count { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: #ffffff1f; font-size: 9px; display: inline-grid; place-items: center; }
+.iso-rooms button.active .iso-count { background: #2a1e0b22; }
+.iso-tools { position: absolute; top: 10px; right: 12px; z-index: 3; display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 10px; background: #0d1522cc; border: 1px solid #23324466; backdrop-filter: blur(6px); }
+.iso-size { display: flex; align-items: center; gap: 7px; color: #c7d2de; font-size: 11px; font-weight: 600; margin-right: 4px; }
+.iso-size input { width: 78px; accent-color: #f1cf86; }
+.iso-tools button { width: 26px; height: 26px; border: 0; border-radius: 7px; background: #ffffff10; color: #e1e9f1; font: inherit; font-size: 14px; line-height: 1; display: grid; place-items: center; }
+.iso-tools button:hover { background: #ffffff22; }
+.iso-badge { position: absolute; left: 12px; bottom: 12px; z-index: 2; max-width: min(70%, 560px); display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 7px; background: #0d1522cc; border: 1px solid #23324466; color: #9fb0c2; font-size: 9px; letter-spacing: .8px; line-height: 1.45; pointer-events: none; }
+.iso-badge .live-dot { width: 5px; height: 5px; flex-shrink: 0; }
+.office-canvas.iso.has-dialog .iso-badge { display: none; }
+.iso-loading, .iso-error { position: absolute; inset: 0; display: grid; place-items: center; color: #c7d2de; font-size: 12px; letter-spacing: .4px; pointer-events: none; }
+.iso-error { color: #f0a29c; padding: 24px; text-align: center; }
+@media (max-width: 760px) {
+  .iso-rooms { left: 12px; right: 12px; top: 48px; }
+  .iso-tools { top: 10px; }
+  .iso-size span { display: none; }
+  .iso-size input { width: 64px; }
+  .iso-badge { display: none; }
+}
+
+/* ── Claude Code sessions in the 2D office ───────────────────────────────────── */
+.agent-dialog-face.claude { background: #d97757; color: #2a130b; }
+.agent-dialog-face.claude.waiting { background: #e0ac5c; }
+.agent-dialog-face.claude.failed { background: #e5726c; }
+.agent-dialog-face.claude.idle { background: #c9a291; }
+.claude-events { list-style: none; margin: 0 0 4px; padding: 0; max-height: 132px; overflow-y: auto; display: grid; gap: 3px; font-size: 11px; color: #cfe0e6; }
+.claude-events li { display: grid; grid-template-columns: auto auto 1fr; gap: 7px; align-items: baseline; }
+.claude-events time { color: #7f97a3; font-variant-numeric: tabular-nums; font-size: 10px; }
+.claude-kind { color: #f0b49c; font-size: 9px; text-transform: uppercase; letter-spacing: .6px; }

@@ -20,6 +20,8 @@ export function latestByAgent(events: StreamEvent[]): Record<number, StreamEvent
 
 export function activityLine(agent: Agent, event?: StreamEvent): string {
   if (!event) return agent.status
+  // Per-tool frames already carry a readable line ("Edit App.tsx").
+  if (event.type.startsWith('action_') && event.message.trim()) return event.message.trim()
   const step = event.stepIndex != null ? ` #${event.stepIndex}` : ''
   const provider = event.provider ? ` · ${event.provider}` : ''
   return `${event.type.replace(/_/g, ' ')}${step}${provider}`

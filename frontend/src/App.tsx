@@ -8,6 +8,7 @@ import PlanPanel from './features/plan/PlanPanel'
 import EventLog, { pushEvent } from './features/events/EventLog'
 import TeamConversation, { mergeTeam, pushTeam } from './features/events/TeamConversation'
 import { latestByAgent } from './lib/activity'
+import { isActionEvent, latestActionByAgent } from './features/iso/actions'
 import { roomById } from './lib/officeLayout'
 import { useEventStream } from './lib/sse'
 import { api } from './lib/api'
@@ -58,6 +59,9 @@ export default function App() {
   const [newRequest, setNewRequest] = useState('')
   const [channels, setChannels] = useState<ChannelStatus | null>(null)
   const [journal, setJournal] = useState<StreamEvent[]>([])
+  // Newest per-tool `action_*` frame per agent. Kept apart from the journal: those frames are
+  // frequent and would push real milestones out of its short window.
+  const [actions, setActions] = useState<Record<number, StreamEvent>>({})
   const [team, setTeam] = useState<TeamEvent[]>([])
   const [convKey, setConvKey] = useState(0)
   const lastStreamRefresh = useRef(0)
@@ -84,6 +88,10 @@ export default function App() {
 
   // Realtime: the SSE journal triggers debounced reloads; a 15s poll is only a safety net.
   const connected = useEventStream(useCallback((event: StreamEvent) => {
+    if (event.kind === 'task' && isActionEvent(event)) {
+      setActions((current) => latestActionByAgent(current, event))
+      return
+    }
     setJournal((current) => pushEvent(current, event))
     if (event.kind === 'task') {
       const agent = agents.find((a) => a.id === event.agentId)
@@ -125,7 +133,7 @@ export default function App() {
 
   const activeCount = tasks.filter((task) => ['running', 'queued', 'reviewing', 'approved'].includes(task.status)).length
   const completedCount = tasks.filter((task) => task.status === 'completed').length
-  const agentActivity = useMemo(() => latestByAgent(journal), [journal])
+  const agentActivity = useMemo(() => latestByAgent([...journal, ...Object.values(actions)]), [journal, actions])
   const meetingTopic = useMemo(() => {
     let topic: string | undefined
     let lastMeeting: StreamEvent | undefined
@@ -313,7 +321,7 @@ export default function App() {
         <div className="content-grid office-grid">
           <section className="panel office-panel">
             <div className="panel-heading">
-              <div><h2>Office Floor</h2><p>3D workspace · Select an agent to inspect</p></div>
+              <div><h2>Office Floor</h2><p>2D / 3D workspace · Select an agent to inspect</p></div>
               <span className="panel-tag"><span className="live-dot"/> LIVE VIEW</span>
             </div>
             <OfficeScene agents={agents} tasks={tasks} selectedId={selectedAgent} onSelect={setSelectedAgent} activity={agentActivity} meetingTopic={meetingTopic} />
@@ -449,7 +457,7 @@ export default function App() {
           </section>
         </div>
         )}
-        <footer className="app-footer"><span>AGENTVILLE MVP 0.2.0</span><span>Local-first · providers: opencode + qoder CLI</span><span>Designed for controlled autonomy</span></footer>
+        <footer className="app-footer"><span>AGENTVILLE MVP 0.2.0</span><span>Local-first · providers: opencode + qoder + claude CLI</span><span>Designed for controlled autonomy</span></footer>
       </section>
 
       {taskResult && <div className="modal-backdrop" onClick={() => setTaskResult(null)}>
