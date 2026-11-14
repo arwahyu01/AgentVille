@@ -548,3 +548,113 @@ def test_provider_is_resolved_from_settings_when_not_injected(conv_db, monkeypat
     orch = Orchestrator()
     orch._provider()
     assert seen == ["qoder"]
+
+
+# -- live action events -----------------------------------------------------------
+
+
+class ActingProvider(FakeProvider):
+    """Calls the persona's live hook like a provider that can see its own tool calls."""
+
+    def __init__(self, responses, actions):
+        super().__init__(responses)
+        self.actions = actions
+
+    def run(self, persona, prompt, timeout_s=300, should_cancel=None):
+        if persona.mode == "coding" and persona.on_action:
+            for kind, summary in self.actions:
+                persona.on_action(kind, summary)
+        return super().run(persona, prompt, timeout_s, should_cancel)
+
+
+def _developer_plan(conv_db):
+    conv_id, anchor_id = start_conversation(conv_db)
+    payload = {"action": "propose", "summary": "code it", "plan": {"steps": [
+        {"title": "Write script", "instruction": "create report.py", "agent_role": "Developer",
+         "depends_on": [], "acceptance_criteria": ["file exists"], "uses_tools": True}]}}
+    tick.provider = FakeProvider([ProviderResult(ok=True, text=json.dumps(payload))])
+    tick(conv_db)
+    with conv_db() as db:
+        conversation_service.approve_plan(db, conv_id, 1)
+    return conv_id, anchor_id
+
+
+def test_tool_calls_become_action_events_attributed_to_the_step_agent(conv_db, client):
+    from app.models import Agent, TaskEvent
+    conv_id, anchor_id = _developer_plan(conv_db)
+    # Three calls in the same instant: the gate keeps the first, so the journal stays readable.
+    tick.provider = ActingProvider(
+        [ProviderResult(ok=True, text="created report.py"), QC_PASS],
+        [("write", "Tulis report.py"), ("read", "Baca data.csv"), ("run", "Terminal: python")])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        byte = db.query(Agent).filter(Agent.role == "Developer").first()
+        actions = db.query(TaskEvent).filter(TaskEvent.event_type.like("action\\_%", escape="\\")).all()
+        assert [(e.event_type, e.message) for e in actions] == [("action_write", "Tulis report.py")]
+        e = actions[0]
+        assert e.agent_id == byte.id and e.step_index == 0 and e.conversation_id == conv_id
+        assert e.provider == "opencode" and e.model == "fake/model"
+    # The transcript feed hides them unless asked; the raw journal keeps them.
+    quiet = client.get("/api/events/team", params={"conversation_id": conv_id}).json()
+    assert all(not ev["event_type"].startswith("action_") for ev in quiet)
+    loud = client.get("/api/events/team", params={"conversation_id": conv_id, "include_actions": "true"}).json()
+    assert any(ev["event_type"] == "action_write" for ev in loud)
+
+
+def test_a_provider_that_never_calls_the_hook_leaves_the_journal_unchanged(conv_db):
+    from app.models import TaskEvent
+    _conv_id, anchor_id = _developer_plan(conv_db)
+    tick.provider = FakeProvider([ProviderResult(ok=True, text="created report.py"), QC_PASS])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        assert db.query(TaskEvent).filter(TaskEvent.event_type.like("action\\_%", escape="\\")).count() == 0
+
+
+# -- reviewer visit after a failed QC ---------------------------------------------
+
+
+def test_failed_qc_sends_the_reviewer_to_the_step_owner(conv_db):
+    from app.models import Agent, TaskEvent
+    with conv_db() as db:
+        set_setting(db, "ai_retry_max", "1")
+        db.add(Agent(name="Sage", role="Researcher", status="idle", position_x=0, position_z=0))
+        db.add(Agent(name="Quill", role="Administrator", status="idle", position_x=0, position_z=0))
+        db.add(Agent(name="Proof", role="Reviewer", status="idle", position_x=0, position_z=0))
+        db.commit()
+    conv_id, anchor_id = drive_to_approval(conv_db)
+    tick.provider = FakeProvider([
+        ProviderResult(ok=True, text="Numbers: 42 rows"),
+        ProviderResult(ok=True, text="fluffy summary"),
+        qc_fail(findings="summary lacks the numbers token=abc123"),
+        ProviderResult(ok=True, text="summary with 42 rows"),
+        QC_PASS,
+    ])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        by_name = {a.name: a for a in db.query(Agent).all()}
+        [visit] = db.query(TaskEvent).filter(TaskEvent.event_type == "review_visit").all()
+        assert visit.actor_agent_id == by_name["Proof"].id and visit.agent_id == by_name["Proof"].id
+        assert visit.recipient_agent_id == by_name["Quill"].id   # owner of failed step 1
+        assert visit.to_room == "admin" and visit.step_index == 1 and visit.conversation_id == conv_id
+        assert "summary lacks the numbers" in visit.message and "abc123" not in visit.message
+        # nobody is left parked in the meeting room once QC passes
+        assert all(a.target_room != "meeting" for a in by_name.values())
+
+
+def test_no_reviewer_on_the_roster_means_no_visit_is_announced(conv_db):
+    from app.models import Agent, TaskEvent
+    with conv_db() as db:
+        set_setting(db, "ai_retry_max", "1")
+        db.add(Agent(name="Quill", role="Administrator", status="idle", position_x=0, position_z=0))
+        db.commit()
+    _conv_id, anchor_id = drive_to_approval(conv_db)
+    tick.provider = FakeProvider([
+        ProviderResult(ok=True, text="Numbers: 42 rows"), ProviderResult(ok=True, text="fluffy"),
+        QC_FAIL, ProviderResult(ok=True, text="better"), QC_PASS])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        assert db.query(TaskEvent).filter(TaskEvent.event_type == "review_visit").count() == 0

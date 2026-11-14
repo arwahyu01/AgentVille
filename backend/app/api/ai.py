@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app import settings_store
 from app.ai import registry
+from app.ai.claude import MODEL_PATTERN as CLAUDE_MODEL_PATTERN
 from app.ai.opencode import MODEL_PATTERN as OPENCODE_MODEL_PATTERN
 from app.ai.qoder import MODEL_PATTERN as QODER_MODEL_PATTERN
 from app.database import get_db
@@ -18,6 +19,7 @@ def _read_config(db: Session) -> AIConfigRead:
         ai_timeout_s=settings_store.ai_timeout_s(db),
         provider=settings_store.ai_provider(db),
         ai_model_qoder=settings_store.get_setting(db, "ai_model_qoder"),
+        ai_model_claude=settings_store.get_setting(db, "ai_model_claude"),
         fallback_enabled=settings_store.ai_fallback_enabled(db),
         retry_max=settings_store.ai_retry_max(db),
         providers=registry.availability(),
@@ -39,6 +41,10 @@ def patch_config(payload: AIConfigPatch, db: Session = Depends(get_db)):
         if not QODER_MODEL_PATTERN.match(payload.ai_model_qoder):
             raise HTTPException(status_code=422, detail="Invalid qoder model name")
         settings_store.set_setting(db, "ai_model_qoder", payload.ai_model_qoder)
+    if payload.ai_model_claude is not None:
+        if not CLAUDE_MODEL_PATTERN.match(payload.ai_model_claude):
+            raise HTTPException(status_code=422, detail="Invalid claude model name")
+        settings_store.set_setting(db, "ai_model_claude", payload.ai_model_claude)
     if payload.provider is not None:
         settings_store.set_setting(db, "ai_provider", payload.provider)
     if payload.ai_enabled is not None:
@@ -54,7 +60,7 @@ def patch_config(payload: AIConfigPatch, db: Session = Depends(get_db)):
 
 
 @router.get("/models")
-def get_models(provider: str = Query("opencode", pattern="^(opencode|qoder)$"), db: Session = Depends(get_db)):
+def get_models(provider: str = Query("opencode", pattern="^(opencode|qoder|claude)$"), db: Session = Depends(get_db)):
     try:
         return {"models": registry.list_models(provider)}
     except Exception as e:

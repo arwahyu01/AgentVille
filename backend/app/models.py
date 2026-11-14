@@ -207,3 +207,26 @@ class TelegramOutbox(Base):
     last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class ClaudeSession(Base):
+    """A Claude Code session seen through the optional AgentVille hooks. Only short, redacted
+    summaries are kept (never file contents, full commands or full prompts)."""
+    __tablename__ = "claude_sessions"
+    session_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    project: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    cwd: Mapped[str] = mapped_column(String(400), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="idle", nullable=False)
+    activity: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    permission_mode: Mapped[str] = mapped_column(String(24), default="", nullable=False)
+    tool_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class ClaudeEvent(Base):
+    __tablename__ = "claude_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    event: Mapped[str] = mapped_column(String(40), nullable=False)
+    summary: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

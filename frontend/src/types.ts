@@ -33,7 +33,7 @@ export interface Task {
   updated_at: string
 }
 
-export type ProviderName = 'opencode' | 'qoder'
+export type ProviderName = 'opencode' | 'qoder' | 'claude'
 
 export interface ProviderInfo {
   available: boolean
@@ -48,6 +48,7 @@ export interface AiConfig {
   ai_timeout_s: number
   provider: ProviderName
   ai_model_qoder: string
+  ai_model_claude?: string
   fallback_enabled: boolean
   retry_max: number
   providers?: Record<ProviderName, ProviderInfo>
@@ -189,4 +190,26 @@ export interface CharacterChatReply {
   provider: string
   model: string
   latency_s: number
+}
+
+/** A Claude Code session reported through the AgentVille HTTP hooks (`scripts/claude_hooks.py`). */
+export type ClaudeSessionStatus = 'idle' | 'working' | 'waiting' | 'completed' | 'failed'
+
+export interface ClaudeSessionEvent {
+  event: string
+  summary: string
+  created_at: string
+}
+
+export interface ClaudeSession {
+  session_id: string
+  project: string
+  cwd: string
+  status: ClaudeSessionStatus
+  activity: string
+  permission_mode: string
+  tool_count: number
+  started_at: string
+  updated_at: string
+  events: ClaudeSessionEvent[]
 }

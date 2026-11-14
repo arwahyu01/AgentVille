@@ -85,6 +85,7 @@ class AIConfigRead(BaseModel):
     ai_timeout_s: int
     provider: str = "opencode"
     ai_model_qoder: str = "Efficient"
+    ai_model_claude: str = "sonnet"
     fallback_enabled: bool = False
     retry_max: int = 1
     providers: dict = {}
@@ -93,7 +94,8 @@ class AIConfigPatch(BaseModel):
     ai_enabled: bool | None = None
     ai_model: str | None = Field(default=None, max_length=80)
     ai_model_qoder: str | None = Field(default=None, max_length=80)
-    provider: Literal["opencode", "qoder"] | None = None
+    ai_model_claude: str | None = Field(default=None, max_length=80)
+    provider: Literal["opencode", "qoder", "claude"] | None = None
     ai_timeout_s: int | None = Field(default=None, ge=10, le=1800)
     fallback_enabled: bool | None = None
     retry_max: int | None = Field(default=None, ge=0, le=3)

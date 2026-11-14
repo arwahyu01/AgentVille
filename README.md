@@ -54,6 +54,20 @@ Hasil akhir: `Open result` menampilkan output, plan steps, QC reviews, path diff
 - **QC retries** (`ai_retry_max`) dan **timeout** per panggilan bisa diatur. Provider/model yang dipakai tercatat per langkah di task, event, dan hasil.
 - Semua preferensi ini disimpan di DB (`settings`), diubah lewat UI atau `PATCH /api/ai/config`.
 
+## Layar penuh
+Tombol ⛶ di pojok kiri atas panel Office Floor (atau tekan **F**) membuat kantor 2D maupun 3D memenuhi layar; **Esc** atau tombol yang sama keluar. Memakai Fullscreen API browser, dan bila tidak tersedia (mis. iPhone) atau ditolak, jatuh ke overlay yang memenuhi viewport. Dialog agen, bilah ruangan, dan penggeser ukuran ikut ada di dalamnya. Pintasan F diabaikan saat mengetik atau dengan Ctrl/⌘/Alt.
+
+## Claude Code
+**Sebagai provider.** Pilih `claude code` di panel AI Engine. Butuh Claude Code CLI: `claude` di PATH (`curl -fsSL https://claude.ai/install.sh | bash`), atau salinan yang ikut aplikasi Claude Desktop di macOS (dicari otomatis di `~/Library/Application Support/Claude/claude-code/`, versi terbaru dulu), atau path sendiri lewat env `AGENTVILLE_CLAUDE_BIN`. Login sekali dengan `claude auth login` (login CLI terpisah dari login aplikasi Desktop); AgentVille tidak menyimpan API key. Mode text menjalankan `claude -p --output-format json --tools ""` tanpa MCP; mode coding memakai `--permission-mode acceptEdits` + daftar tool eksplisit dengan `cwd=<workspace>` (pembatasan oleh konvensi CLI, bukan jail OS). Model: `sonnet`, `opus`, `haiku`, `fable`, atau ID lengkap.
+
+**Sesi Claude di kantor 2D.** Sesi Claude Code (terminal, IDE, atau aplikasi desktop) bisa muncul sebagai karakter berbaju oranye di meja yang kosong: duduk saat bekerja, berdiri dengan "!" saat menunggu izin, ke pantry setelah selesai dan diam beberapa menit. Klik karakternya untuk melihat riwayat aktivitas.
+```bash
+python3 scripts/claude_hooks.py            # pratinjau perubahan ~/.claude/settings.json
+python3 scripts/claude_hooks.py --apply    # pasang (hook lama dipertahankan, backup dibuat)
+python3 scripts/claude_hooks.py --remove --apply
+```
+Hook bertipe `http` mengirim event ke `POST /api/claude/hooks`; bila backend mati, Claude Code menganggapnya error non-blocking dan tetap jalan. Yang disimpan hanya ringkasan satu baris yang sudah disamarkan (nama file, deskripsi perintah, potongan prompt) — tidak pernah isi file, perintah utuh, atau prompt utuh. Langkah yang dijalankan provider Claude milik AgentVille ditandai `AGENTVILLE_RUN` dan tidak digambar dua kali.
+
 ## Telegram (kanal dua arah penuh)
 ```powershell
 cd backend

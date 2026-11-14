@@ -1,9 +1,11 @@
 import threading
 import time
 
+from app.ai import claude as claude_mod
 from app.ai import opencode as opencode_mod
 from app.ai import qoder as qoder_mod
 from app.ai.base import AIProvider
+from app.ai.claude import ClaudeProvider
 from app.ai.opencode import OpencodeProvider
 from app.ai.qoder import QoderProvider
 
@@ -15,7 +17,12 @@ _cache_lock = threading.Lock()
 def make_provider(name: str) -> AIProvider:
     if name == "qoder":
         return QoderProvider()
+    if name == "claude":
+        return ClaudeProvider()
     return OpencodeProvider()
+
+
+PROVIDERS = ("opencode", "qoder", "claude")
 
 
 def capabilities() -> dict[str, dict]:
@@ -30,6 +37,11 @@ def capabilities() -> dict[str, dict]:
             "text": QoderProvider,
             "coding": QoderProvider,
             "coding_flags": "--permission-mode accept_edits + -w <workspace>",
+        },
+        "claude": {
+            "text": ClaudeProvider,
+            "coding": ClaudeProvider,
+            "coding_flags": "--permission-mode acceptEdits + --tools/--allowedTools + cwd=<workspace>",
         },
     }
 
@@ -53,6 +65,10 @@ def availability() -> dict[str, dict]:
         if name == "opencode":
             available = bool(opencode_mod.shutil.which("opencode"))
             reason = None if available else "opencode CLI not found on PATH — install it or run `opencode auth login`"
+        elif name == "claude":
+            available = bool(claude_mod.find_binary())
+            reason = None if available else ("claude CLI not found — install Claude Code "
+                                             "(curl -fsSL https://claude.ai/install.sh | bash) and run `claude auth login`")
         else:
             available = bool(qoder_mod.find_binary())
             reason = None if available else "qodercli not found — install Qoder CLI or add it to PATH"
@@ -68,6 +84,8 @@ def availability() -> dict[str, dict]:
 def list_models(provider: str, force: bool = False) -> list[str]:
     if provider == "qoder":
         return _cached(provider, qoder_mod.list_available_models, force)
+    if provider == "claude":
+        return _cached(provider, claude_mod.list_available_models, force)
     return _cached("opencode", opencode_mod.list_available_models, force)
 
 

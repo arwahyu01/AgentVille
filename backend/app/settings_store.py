@@ -30,10 +30,14 @@ def ai_timeout_s(db: Session) -> int:
 
 def ai_provider(db: Session) -> str:
     value = get_setting(db, "ai_provider")
-    return value if value in ("opencode", "qoder") else "opencode"
+    return value if value in ("opencode", "qoder", "claude") else "opencode"
 
 def ai_model_for(db: Session, provider: str) -> str:
-    return get_setting(db, "ai_model_qoder") if provider == "qoder" else get_setting(db, "ai_model")
+    if provider == "qoder":
+        return get_setting(db, "ai_model_qoder")
+    if provider == "claude":
+        return get_setting(db, "ai_model_claude")
+    return get_setting(db, "ai_model")
 
 def ai_fallback_enabled(db: Session) -> bool:
     return get_setting(db, "ai_fallback_enabled") == "1"

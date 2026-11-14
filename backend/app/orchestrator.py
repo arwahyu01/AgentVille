@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app import conversation_service
 from app import task_service
+from app.agent_actions import ActionGate, redact
 from app.ai import registry
 from app.ai import fallback as ai_fallback
 from app.ai.base import AIProvider, Persona, ProviderResult
@@ -346,6 +347,7 @@ class Orchestrator(threading.Thread):
                 "coding_models": {
                     "opencode": ai_model_for(db, "opencode"),
                     "qoder": ai_model_for(db, "qoder"),
+                    "claude": ai_model_for(db, "claude"),
                 },
                 "fallback": ai_fallback_enabled(db),
                 "retry_max": ai_retry_max(db),
@@ -364,19 +366,23 @@ class Orchestrator(threading.Thread):
             name, _cls = registry.coding_provider(cfg["provider"])
             if name is None or not avail.get(name, {}).get("available"):
                 return (None, cfg["provider"], cfg["coding_models"].get(cfg["provider"], ""), None,
-                        "coding steps need an installed CLI with coding support (opencode or qodercli) — "
+                        "coding steps need an installed CLI with coding support (opencode, qodercli or claude) — "
                         "install one, or edit the step to run without tools")
             model = cfg["coding_models"].get(name, "")
             alternate = None
             if cfg["fallback"]:
-                other = next((n for n in ("opencode", "qoder")
+                other = next((n for n in registry.PROVIDERS
                               if n != name and avail.get(n, {}).get("available")), None)
                 alternate = registry.make_provider(other) if other else None
             return (registry.make_provider(name), name, model, alternate, "")
         name = cfg["provider"]
         alternate = None
         if cfg["fallback"]:
-            other = "qoder" if name == "opencode" else "opencode"
+            # Prefer another provider whose CLI is actually installed; otherwise keep the old
+            # opencode <-> qoder pairing so the failure message stays actionable.
+            avail = registry.availability()
+            other = next((n for n in registry.PROVIDERS if n != name and avail.get(n, {}).get("available")),
+                         "qoder" if name == "opencode" else "opencode")
             alternate = registry.make_provider(other)
         return (registry.make_provider(name), name, cfg["text_model"], alternate, "")
 
@@ -673,12 +679,56 @@ class Orchestrator(threading.Thread):
         db.commit()
 
 
+    def _review_visits(self, db, anchor_id: int, conversation_id: int, failed_steps, findings: str) -> None:
+        """QC failed and the steps go back for revision: each responsible specialist returns to
+        its own desk, and one `review_visit` frame per step records that the Reviewer brings the
+        findings there (actor = Reviewer, recipient = step owner). The office replays the visit
+        from that frame; without a Reviewer agent on the roster nothing is announced."""
+        reviewer = db.query(Agent).filter(Agent.role == "Reviewer").order_by(Agent.id).first()
+        line = redact(findings, 160) or "temuan QC"
+        children = db.query(Task).filter(Task.parent_id == anchor_id).all()
+        for child in children:
+            if child.plan_step_index not in failed_steps or not child.agent_id:
+                continue
+            owner = db.get(Agent, child.agent_id)
+            if owner is None:
+                continue
+            room = room_for_role(owner.role)
+            seat_agent(db, owner.id, room=room, target_room="")
+            if reviewer is not None and reviewer.id != owner.id:
+                add_event(db, child.id, "review_visit",
+                          f"Temuan QC untuk langkah {child.plan_step_index}: {line}",
+                          conversation_id=conversation_id, agent_id=reviewer.id,
+                          step_index=child.plan_step_index, actor_agent_id=reviewer.id,
+                          recipient_agent_id=owner.id,
+                          from_room=room_for_role(reviewer.role), to_room=room)
+
     def _step_model(self, cfg: dict, coding: bool) -> str:
         if not coding:
             return cfg["text_model"]
         name, _cls = registry.coding_provider(cfg["provider"])
         name = name or cfg["provider"]
         return cfg["coding_models"].get(name, cfg["text_model"])
+
+    def _action_sink(self, child_id: int, index: int, conversation_id: int, agent_id: int | None,
+                     provider_name: str, model: str):
+        """Callback that journals one `action_<kind>` frame per observed tool call, attributed to
+        the step's agent so the office can show it. Rate-limited, and never raises: a locked
+        database must not fail the step it is describing."""
+        gate = ActionGate()
+
+        def sink(kind: str, summary: str) -> None:
+            if not gate.allow():
+                return
+            try:
+                with self._db_lock, SessionLocal() as db:
+                    add_event(db, child_id, f"action_{kind}", summary[:300], conversation_id=conversation_id,
+                              agent_id=agent_id, provider=provider_name, model=model, step_index=index)
+                    db.commit()
+            except Exception:  # noqa: BLE001
+                logger.warning("could not journal an action event", exc_info=True)
+
+        return sink
 
     def _run_specialist_step(self, step: PlanStep, index: int, child_id: int, anchor_id: int,
                              persona: Persona, outputs: dict[int, str], instruction: str,
@@ -693,6 +743,7 @@ class Orchestrator(threading.Thread):
                 transition(db, child, "queued", "Step queued (approved plan)", conversation_id=conversation_id)
             if child.status == "queued":
                 transition(db, child, "running", "Step started", conversation_id=conversation_id)
+            step_agent_id = child.agent_id
             add_event(db, anchor_id, "step_started", f"Step {index} ({step.agent_role}) on {provider_name}",
                       conversation_id=conversation_id, agent_id=child.agent_id,
                       provider=provider_name, model=model, step_index=index)
@@ -705,6 +756,10 @@ class Orchestrator(threading.Thread):
             db.commit()
         if provider is None:
             return ProviderResult(ok=False, error=error)
+        # Providers that can observe their own tool calls report them live; the journal then says
+        # what the agent is reading/writing/running instead of only "step started".
+        persona = dataclasses.replace(persona, on_action=self._action_sink(
+            child_id, index, conversation_id, step_agent_id, provider_name, model))
         context = instruction
         if step.depends_on:
             prior = "\n\n".join(f"[Result of step {dep}: {outputs.get(dep, '')}]" for dep in step.depends_on)
@@ -925,6 +980,7 @@ class Orchestrator(threading.Thread):
                         and iteration <= cfg["retry_max"] and failed_steps):
                     transition(db, anchor, "running",
                                f"QC round {iteration} failed; revising steps {failed_steps}")
+                    self._review_visits(db, anchor_id, conversation_id, failed_steps, findings)
                     db.commit()
                 else:
                     reason = ("QC failed" if verdict == "fail"

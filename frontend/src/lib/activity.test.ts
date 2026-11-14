@@ -21,6 +21,7 @@ describe('office activity', () => {
 
   it('falls back to the backend status when no event has been seen for that agent', () => {
     expect(activityLine({ ...atlas, status: 'waiting' })).toBe('waiting')
+    expect(activityLine(atlas, event({ type: 'action_write', message: 'Edit App.tsx' }))).toBe('Edit App.tsx')
   })
 
   it('keeps only the newest frame per agent and ignores frames without an owner', () => {

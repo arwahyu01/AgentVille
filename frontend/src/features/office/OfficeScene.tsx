@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import * as THREE from 'three'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
-import { X } from 'lucide-react'
+import { Maximize2, Minimize2, X } from 'lucide-react'
 import { poseFor, stationSlots, taskOfAgent, workBrief, type WorkBrief } from '../../lib/activity'
 import { ENTRANCE, ROOMS, ROOM_ORDER, roomById } from '../../lib/officeLayout'
 import { CAMPUS_VIEW } from '../../lib/campusLayout'
@@ -14,6 +14,7 @@ import { CorridorProps, RoomFitout } from './RoomFitout'
 import { CharacterChat, type CharacterAiMeta } from './CharacterChat'
 import { STAFF_INTRO, STAFF_SUGGESTIONS, answerStaff, type StaffVariant } from './staffScript'
 import { useSocialLife } from './useSocialLife'
+import { isTypingTarget, useFullscreen } from './useFullscreen'
 import { Ceiling, DoorLight, EntrancePortal, Floors, OfficeShell, Signage, Walls } from './Structure'
 import type { Agent, StreamEvent, Task } from '../../types'
 
@@ -24,6 +25,17 @@ import type { Agent, StreamEvent, Task } from '../../types'
  *  Agent state, event motion and the renderer are never rebuilt by a mode switch. */
 export type CameraMode = 'campus' | 'office' | 'explore'
 export type Quality = 'high' | 'lean'
+/** `2d` is the painted isometric office (PixiJS); `3d` the original React Three Fiber scene. */
+export type Renderer = '2d' | '3d'
+
+// Loaded on demand so the 3D-only path never downloads PixiJS, and vice versa for Three's scene.
+const IsoOffice = lazy(() => import('../iso/IsoOffice'))
+
+const RENDERER_KEY = 'agentville.renderer'
+
+function readRenderer(): Renderer {
+  try { return window.localStorage.getItem(RENDERER_KEY) === '3d' ? '3d' : '2d' } catch { return '2d' }
+}
 
 interface View {
   pos: [number, number, number]
@@ -174,12 +186,14 @@ const HINTS: Record<CameraMode, string> = {
   explore: 'Explore — click the scene for mouse look · WASD / arrows walk · Shift runs · Esc frees the mouse, press again to exit',
 }
 
-export default function OfficeScene({ agents, tasks, selectedId, onSelect, activity, meetingTopic }: {
+export default function OfficeScene({ agents, tasks, selectedId, onSelect, activity, errands, meetingTopic }: {
   agents: Agent[]
   tasks?: Task[]
   selectedId: number | null
   onSelect: (id: number | null) => void
   activity?: Record<number, StreamEvent>
+  /** Newest handoff / review-visit frame per acting agent (2D office replays the trip). */
+  errands?: Record<number, StreamEvent>
   meetingTopic?: string
 }) {
   const [mode, setMode] = useState<CameraMode>('office')
@@ -187,6 +201,23 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
   const [quality, setQuality] = useState<Quality>('high')
   const [nearEntrance, setNearEntrance] = useState(false)
   const [staffTalk, setStaffTalk] = useState<StaffVariant | null>(null)
+  const [renderer, setRenderer] = useState<Renderer>(readRenderer)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const fullscreen = useFullscreen(boxRef)
+  // `F` toggles full screen from anywhere on the office view, except while typing.
+  const toggleFullscreen = fullscreen.toggle
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'f' || e.ctrlKey || e.metaKey || e.altKey || isTypingTarget(e.target)) return
+      e.preventDefault()
+      toggleFullscreen()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [toggleFullscreen])
+  useEffect(() => {
+    try { window.localStorage.setItem(RENDERER_KEY, renderer) } catch { /* private mode */ }
+  }, [renderer])
   const pad = useRef<VirtualPad>({ forward: false, back: false, left: false, right: false })
   const supported = useMemo(hasWebGL, [])
   const qa = useMemo(() => {
@@ -223,8 +254,69 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
     onPointerCancel: () => setPad(key, false),
   })
 
+  const rendererSwitch = (
+    <div className="renderer-switch" role="group" aria-label="Renderer">
+      <button type="button" className={renderer === '2d' ? 'active' : ''} onClick={() => setRenderer('2d')}>2D</button>
+      <button type="button" className={renderer === '3d' ? 'active' : ''} onClick={() => setRenderer('3d')}>3D</button>
+      <button
+        type="button" className="fs" onClick={fullscreen.toggle}
+        aria-pressed={fullscreen.active}
+        aria-label={fullscreen.active ? 'Keluar layar penuh' : 'Layar penuh'}
+        title={fullscreen.active ? 'Keluar layar penuh (F / Esc)' : 'Layar penuh (F)'}
+      >{fullscreen.active ? <Minimize2 size={13} /> : <Maximize2 size={13} />}</button>
+    </div>
+  )
+
+  const dialogs = (
+    <>
+      {selected && brief && (
+        <AgentDialog
+          key={selected.id}
+          agent={selected}
+          brief={brief}
+          room={selectedRoom?.label ?? 'On the floor'}
+          target={selected.target_room && selected.target_room !== selected.current_room
+            ? roomById(selected.target_room).label : null}
+          onClose={() => onSelect(null)}
+        />
+      )}
+      {staffTalk && (
+        <StaffDialog
+          key={staffTalk}
+          variant={staffTalk}
+          agents={agents}
+          onClose={() => setStaffTalk(null)}
+        />
+      )}
+    </>
+  )
+
+  if (renderer === '2d') {
+    return (
+      <div ref={boxRef} className={`office-canvas iso${selected || staffTalk ? ' has-dialog' : ''}${fullscreen.overlay ? ' expanded' : ''}`} id="office-canvas" data-mode="2d" data-qa={qa ? '1' : '0'} data-fullscreen={fullscreen.active ? '1' : '0'}>
+        <Suspense fallback={<div className="iso-loading">Memuat kantor 2D…</div>}>
+          <IsoOffice
+            agents={agents}
+            tasks={tasks ?? []}
+            selectedId={selectedId}
+            onSelect={(id) => { setStaffTalk(null); onSelect(id) }}
+            onClearSelection={() => { setStaffTalk(null); onSelect(null) }}
+            activity={activity ?? {}}
+            errands={errands ?? {}}
+            meetingTopic={meetingTopic}
+            onStaffTalk={(variant) => { onSelect(null); setStaffTalk(variant) }}
+            qa={qa}
+          />
+        </Suspense>
+        {rendererSwitch}
+        {dialogs}
+      </div>
+    )
+  }
+
   return (
-    <div className={`office-canvas ${mode}${selected || staffTalk ? ' has-dialog' : ''}`} id="office-canvas" data-mode={mode} data-qa={qa ? '1' : '0'}>
+    <div ref={boxRef} className={`office-canvas ${mode}${selected || staffTalk ? ' has-dialog' : ''}${fullscreen.overlay ? ' expanded' : ''}`} id="office-canvas" data-mode={mode} data-qa={qa ? '1' : '0'} data-fullscreen={fullscreen.active ? '1' : '0'}>
+      {rendererSwitch}
       <Canvas
         shadows
         dpr={quality === 'high' ? [1, 1.8] : [1, 1.2]}
@@ -300,26 +392,7 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
       </div>
       <div className="scene-hint">{HINTS[mode]}</div>
 
-      {selected && brief && (
-        <AgentDialog
-          key={selected.id}
-          agent={selected}
-          brief={brief}
-          room={selectedRoom?.label ?? 'On the floor'}
-          target={selected.target_room && selected.target_room !== selected.current_room
-            ? roomById(selected.target_room).label : null}
-          onClose={() => onSelect(null)}
-        />
-      )}
-
-      {staffTalk && (
-        <StaffDialog
-          key={staffTalk}
-          variant={staffTalk}
-          agents={agents}
-          onClose={() => setStaffTalk(null)}
-        />
-      )}
+      {dialogs}
 
       {mode === 'explore' && !staffTalk && !selected && (
         <>

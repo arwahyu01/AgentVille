@@ -37,6 +37,7 @@ def list_office_events(limit: int = Query(50, ge=1, le=200),
 @router.get("/team", response_model=list[TeamEventRead])
 def list_team_events(limit: int = Query(60, ge=1, le=200),
                      conversation_id: int | None = Query(None, ge=1),
+                     include_actions: bool = Query(False),
                      db: Session = Depends(get_db)):
     """The team work transcript: persisted journal frames with the speaker's name/role and
     the task title attached, newest first. This is the history feed for the Percakapan Tim
@@ -46,6 +47,10 @@ def list_team_events(limit: int = Query(60, ge=1, le=200),
              .outerjoin(Agent, Agent.id == TaskEvent.agent_id))
     if conversation_id is not None:
         query = query.filter(TaskEvent.conversation_id == conversation_id)
+    if not include_actions:
+        # Per-tool `action_*` frames feed the office view; in the transcript they would push the
+        # milestones (plans, handoffs, QC) out of the newest-60 window.
+        query = query.filter(~TaskEvent.event_type.like("action\\_%", escape="\\"))
     rows = query.order_by(TaskEvent.id.desc()).limit(limit).all()
     return [
         TeamEventRead(id=ev.id, task_id=ev.task_id, task_title=task.title if task else "",

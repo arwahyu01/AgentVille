@@ -16,7 +16,8 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
   const [models, setModels] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const provider: ProviderName = config?.provider ?? 'opencode'
-  const model = provider === 'qoder' ? config?.ai_model_qoder ?? '' : config?.ai_model ?? ''
+  const model = provider === 'qoder' ? config?.ai_model_qoder ?? ''
+    : provider === 'claude' ? config?.ai_model_claude ?? '' : config?.ai_model ?? ''
 
   useEffect(() => {
     if (!config?.ai_enabled) return
@@ -56,6 +57,7 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
                   onChange={(e) => void patch({ provider: e.target.value as ProviderName })}>
             <option value="opencode">opencode (text)</option>
             <option value="qoder">qoder (text + coding)</option>
+            <option value="claude">claude code (text + coding)</option>
           </select>
           <Availability info={config.providers?.[provider]} name={provider} />
         </div>
@@ -63,7 +65,8 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
           <span>Model</span>
           {models.length > 0 ? (
             <select aria-label="AI model" disabled={busy || !config.ai_enabled} value={selected}
-                    onChange={(e) => void patch(provider === 'qoder' ? { ai_model_qoder: e.target.value } : { ai_model: e.target.value })}>
+                    onChange={(e) => void patch(provider === 'qoder' ? { ai_model_qoder: e.target.value }
+                      : provider === 'claude' ? { ai_model_claude: e.target.value } : { ai_model: e.target.value })}>
               {selected === '' && <option value="" disabled>{model} (from settings)</option>}
               {models.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
@@ -89,7 +92,9 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
         <small className="ai-bar-note">
           {provider === 'qoder'
             ? 'qodercli runs coding steps inside the confined workspace'
-            : 'opencode CLI is text-only here; coding steps route to qodercli'}
+            : provider === 'claude'
+              ? 'claude -p runs steps with your Claude Code login; coding steps use acceptEdits inside the workspace'
+              : 'opencode CLI is text-only here; coding steps route to qodercli'}
         </small>
       </div>
     </section>

@@ -1,4 +1,4 @@
-import type { Agent, AiConfig, ChannelStatus, CharacterChatReply, CharacterChatTurn, ChatMessage, Conversation, PlanInfo, PlanRead, ProviderName, Task, TaskEvent, TaskResult, TeamEvent } from '../types'
+import type { Agent, AiConfig, ChannelStatus, ClaudeSession,CharacterChatReply, CharacterChatTurn, ChatMessage, Conversation, PlanInfo, PlanRead, ProviderName, Task, TaskEvent, TaskResult, TeamEvent } from '../types'
 
 // Relative by default so the page keeps working when opened from another device on the LAN;
 // Vite proxies `/api` to the backend. Override with VITE_API_BASE only for split deployments.
@@ -27,6 +27,7 @@ export const api = {
     request<Task>(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   cancelTask: (id: number) => request<Task>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
   aiConfig: () => request<AiConfig>('/api/ai/config'),
+  claudeSessions: () => request<{ sessions: ClaudeSession[] }>('/api/claude/sessions'),
   patchAiConfig: (payload: Partial<AiConfig>) =>
     request<AiConfig>('/api/ai/config', { method: 'PATCH', body: JSON.stringify(payload) }),
   aiModels: (provider?: ProviderName) =>
