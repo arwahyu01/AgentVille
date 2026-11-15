@@ -29,6 +29,34 @@ Buka URL dari Vite (umumnya http://localhost:5173).
 
 Vite mendengarkan di semua antarmuka dan mem-proxy `/api` ke backend loopback, jadi perangkat lain di jaringan yang sama bisa membuka `http://<IP-LAN-komputer>:5173` tanpa mengubah CORS atau mengekspos port 8000. Jika Windows Firewall memblokir, izinkan Node.js untuk jaringan aktif. Untuk kembali ke localhost saja: `npm run dev -- --host 127.0.0.1`.
 
+## Menjalankan di macOS / Linux
+Butuh Python 3.11+ (Python bawaan macOS 3.9 terlalu lama; `uv` memasang 3.12 sendiri) dan Node 20+.
+
+Sekali saja, siapkan environment:
+```bash
+cd backend && uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[dev]"
+cd ../frontend && npm install
+```
+Setiap kali menjalankan, di dua terminal:
+```bash
+cd backend && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+```bash
+cd frontend && npm run dev -- --host 127.0.0.1
+```
+Buka **http://127.0.0.1:5173** (pakai `127.0.0.1`, bukan `localhost`: bila proyek lain memakai port 5173 di IPv6, `localhost` bisa membuka proyek itu). Data ada di `data/` dan tetap ada setelah server dimatikan.
+
+**Bila port 8000 atau 5173 sudah dipakai proyek lain** (mis. `php artisan serve`), jalankan AgentVille di port lain dan arahkan proxy frontend ke backend-nya:
+```bash
+cd backend && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001
+```
+```bash
+cd frontend && AGENTVILLE_API=http://127.0.0.1:8001 npm run dev -- --host 127.0.0.1 --port 5180 --strictPort
+```
+lalu buka http://127.0.0.1:5180. `AGENTVILLE_API` hanya dibaca oleh `vite.config.ts` (bawaannya `http://127.0.0.1:8000`).
+
+Dari aplikasi Claude Desktop, entri `agentville-backend` dan `agentville-frontend` di `.claude/launch.json` menjalankan keduanya dari panel preview.
+
 ## Alur produk (satu halaman)
 1. Tulis perintah di bilah atas (mis. "Buatkan landing page untuk kedai kopi") → **Kerjakan**. Ini membuat conversation + task anchor berstatus `clarifying`. Tidak ada menu/tab: antrean, hasil, dan percakapan tim ada di layar yang sama.
 2. Coordinator bertanya lewat chat bila memang perlu. Jawab di panel kanan; pertanyaan yang menunggu jawaban selalu ditampilkan.
@@ -103,6 +131,8 @@ copy .env.example .env
 - SQLite `data/agentville.db`: `agents, tasks, task_events, settings, conversations, messages, plans, approvals, qc_reviews, telegram_updates, telegram_outbox` (migrasi kolom/index aditif saat startup; data lama bertahan).
 
 ## Test & build
+Di macOS / Linux: `cd backend && .venv/bin/python -m pytest -q` dan `cd frontend && npm run test && npm run lint && npm run build`. Satu tes (`test_kill_tree_terminates_grandchild`) gagal di macOS, juga pada kode asli sebelum perubahan di branch ini; penyebabnya belum diselidiki.
+
 ```powershell
 cd backend  && .\.venv\Scripts\Activate.ps1 && pytest        # 238 passed + 1 skipped (sandbox+tree-kill/pipe-EOF, provider+flag catalog, fallback, rotasi mesin kuota-habis, agent chatter, conversation+auto-approve, orchestrator+QC+eskalasi, preview/workspace confinement, telegram mock+outbox+command, SSE replay)
 cd frontend && npm run test && npm run lint && npm run build # 157 tes vitest, 0 error lint (17 warning react-refresh lama)
