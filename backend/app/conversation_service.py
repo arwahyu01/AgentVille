@@ -15,6 +15,7 @@ from app.models import Agent, Approval, Conversation, Message, Plan, Task
 from app.plan_schema import TaskPlan
 from app.rooms import room_for_role
 from app.settings_store import plan_max_depth, plan_max_steps
+from app import workflows
 from app.task_service import add_event, force_transition, say, seat_agent, transition
 
 # Who signs an auto-approval: the office decides, the user gets the log instead of a gate.
@@ -191,7 +192,9 @@ def propose_plan(db: Session, conversation_id: int, plan: TaskPlan, summary: str
     """
     conv = get_conversation(db, conversation_id)
     plan.validate_for_conversation()
-    plan.validate_for_budget(plan_max_steps(db), plan_max_depth(db))
+    workflows.apply_workflow(plan)
+    plan.validate_for_budget(plan_max_steps(db),
+                             max(plan_max_depth(db), workflows.depth_allowance(plan.workflow)))
     anchor = _anchor(db, conv)
     if anchor.status == "awaiting_approval":
         _end_plan_meeting(db, conv, anchor, get_plan_row(db, conv.id, conv.current_plan_version), "diganti rencana baru")
@@ -211,9 +214,22 @@ def propose_plan(db: Session, conversation_id: int, plan: TaskPlan, summary: str
                event_type="plan_proposed", conversation_id=conv.id)
     db.refresh(row)
     _start_plan_meeting(db, conv, anchor, row, plan)
-    # No manual gate: the leader briefs the crew, signs the plan and execution is queued.
+    if needs_user_gate(plan, "plan"):
+        # Workflow plans stop here: the crew has been briefed, the user decides whether work starts.
+        add_event(db, anchor.id, "gate_waiting",
+                  f"Gerbang persetujuan: rencana v{version} menunggu keputusan Anda",
+                  conversation_id=conv.id)
+        db.commit()
+        return row
+    # Free-form plans have no manual gate: the leader signs the plan and execution is queued.
     approve_plan(db, conv.id, version, decided_by=LEADER_IDENTITY)
     return row
+
+
+def needs_user_gate(plan: TaskPlan | None, gate: str) -> bool:
+    """True when the plan's workflow reserves this gate ("plan" or "final") for the user."""
+    flow = workflows.get(plan.workflow) if plan is not None and plan.workflow else None
+    return flow is not None and gate in flow.user_gates
 
 
 def materialise_steps(db: Session, conv: Conversation, anchor: Task, plan: TaskPlan) -> list[Task]:
@@ -282,7 +298,10 @@ def proposal_message(db: Session, conv: Conversation, row: Plan, plan: TaskPlan)
         owner = step.agent_role + (f" · {names[step.agent_role]}" if step.agent_role in names else "")
         deps = ", ".join(f"#{d}" for d in step.depends_on) if step.depends_on else "nothing — starts right away"
         tools = " · writes files in the workspace" if step.uses_tools else ""
-        lines.append(f"{index}. {step.title} — {owner}")
+        check = f" · diperiksa {step.reviewer_role}" if step.reviewer_role else ""
+        lines.append(f"{index}. {step.title} — {owner}{check}")
+        if step.deliverable:
+            lines.append(f"   Delivers: {step.deliverable}")
         lines.append(f"   Does: {step.instruction[:300]}")
         lines.append(f"   Depends on: {deps}{tools}")
         for criterion in step.acceptance_criteria:
@@ -291,7 +310,9 @@ def proposal_message(db: Session, conv: Conversation, row: Plan, plan: TaskPlan)
         lines.extend(["", "Overall acceptance criteria:"])
         lines.extend(f"- {criterion[:200]}" for criterion in plan.acceptance_criteria)
     lines.append("")
-    if conv.channel == "telegram":
+    if needs_user_gate(plan, "plan"):
+        lines.append("Work waits for your approval of this plan. Approve it, or request a revision.")
+    elif conv.channel == "telegram":
         lines.append(f"Work starts automatically. Send /revise <notes> to stop it and redraft.")
     else:
         lines.append("Work starts automatically — watch the office log, or request a revision to redraft.")
@@ -346,7 +367,7 @@ def request_revision(db: Session, conversation_id: int, notes: str,
     also stops whatever this request already spawned, then returns the anchor to clarifying."""
     conv = get_conversation(db, conversation_id)
     anchor = _anchor(db, conv)
-    allowed = ("clarifying", "awaiting_approval", "approved", "queued", "running")
+    allowed = ("clarifying", "awaiting_approval", "approved", "queued", "running", "awaiting_acceptance", "failed")
     if anchor.status not in allowed or conv.current_plan_version == 0:
         raise ConversationError(f"Cannot request a revision while task is '{anchor.status}'")
     row = get_plan_row(db, conv.id, conv.current_plan_version)
@@ -357,6 +378,11 @@ def request_revision(db: Session, conversation_id: int, notes: str,
     for child in db.query(Task).filter(Task.parent_id == anchor.id).all():
         if child.status in ("pending", "queued", "running"):
             force_transition(db, child, "cancelled", "Cancelled because the plan is being revised")
+        # The next plan version gets its own step tasks. Old ones stay as history but leave the
+        # step list (no step index, not required), so they can never be mistaken for the new
+        # plan's steps or block its completion.
+        child.plan_step_index = None
+        child.required = "0"
     if anchor.status == "clarifying":
         # Redrafting before anything ran: the state is already right, only the log changes.
         add_event(db, anchor.id, "revision_requested",
@@ -367,6 +393,19 @@ def request_revision(db: Session, conversation_id: int, notes: str,
         transition(db, anchor, "clarifying", "Revision requested; Coordinator will redraft",
                    event_type="revision_requested", conversation_id=conv.id)
     _end_plan_meeting(db, conv, anchor, row, "revisi diminta")
+    db.refresh(conv)
+    return conv
+
+
+def accept_result(db: Session, conversation_id: int, decided_by: str = "local") -> Conversation:
+    """The user's final gate on a workflow plan: QC has passed, the result is waiting for sign-off."""
+    conv = get_conversation(db, conversation_id)
+    anchor = _anchor(db, conv)
+    if anchor.status != "awaiting_acceptance":
+        raise ConversationError(f"Nothing awaiting acceptance (task is '{anchor.status}')")
+    transition(db, anchor, "completed", f"Hasil diterima oleh {decided_by}",
+               event_type="result_accepted", conversation_id=conv.id)
+    add_message(db, conv.id, f"Hasil diterima: {anchor.title}.", role="assistant")
     db.refresh(conv)
     return conv
 

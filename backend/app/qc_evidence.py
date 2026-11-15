@@ -646,6 +646,10 @@ def _excerpt_priority(item: _Item) -> tuple[int, str]:
 
 def _excerpt(item: _Item, limit: int) -> str:
     text = item.text
+    if len(text) <= limit:
+        # The whole file fits: show it. Skipping to a "Ringkasan" heading hid every table and
+        # list in the body, so the reviewer could never verify criteria about them.
+        return text
     if item.kind == "html":
         head = text[:min(240, limit)]
         marker = re.search(r"<nav\b|<main\b", text, re.IGNORECASE)
@@ -666,11 +670,16 @@ def _excerpt(item: _Item, limit: int) -> str:
         marker = re.search(
             r"^#{1,3}\s*(?:Hasil|Ringkasan|Kesimpulan|Result|Summary|Verification|Verifikasi)",
             text, re.IGNORECASE | re.MULTILINE)
-        if marker:
+        if marker and limit <= MAX_EXCERPT_CHARS:
             head = text[:140]
             tail = text[marker.start():marker.start() + max(200, limit - len(head) - 8)]
             return head.rstrip() + "\n…\n" + tail.strip()
-        return text[:limit]
+        # Roomy packet but the file is still larger: keep most of the body and the ending, and
+        # say plainly that the middle is missing.
+        head_n = int(limit * 0.75)
+        tail_n = max(0, limit - head_n - 60)
+        return (text[:head_n].rstrip() + f"\n… [{len(text) - head_n - tail_n} karakter tengah tidak ditampilkan] …\n"
+                + text[-tail_n:].lstrip())
     return text[:limit]
 
 
@@ -689,7 +698,10 @@ def _assemble(inventory: list[str], checks: list[str], diff_text: str,
         return "\n".join(parts)
 
     # Reserve room for code/report excerpts: they are what the reviewer actually judges.
-    reserve = min(2400, max(1200, budget // 3))
+    # A small packet (argv-bound providers) keeps the old tight excerpts; a roomy one (Claude via
+    # stdin) gives the reviewer real stretches of each document so it can verify criteria.
+    roomy = budget > 6500
+    reserve = int(budget * 0.65) if roomy else min(2400, max(1200, budget // 3))
     base_budget = max(1200, budget - reserve)
     diff_body = diff_text
     text = render(inventory, checks, diff_body)
@@ -712,10 +724,13 @@ def _assemble(inventory: list[str], checks: list[str], diff_text: str,
     excerpts: list[str] = ["", "EXCERPTS (truncated; full files are not provided)"]
     remaining = budget - len(text)
     used = 0
+    max_items = 5 if roomy else MAX_EXCERPTS
+    per_item = (min(14000, max(MAX_EXCERPT_CHARS, (budget - len(text)) // max(1, min(max_items, len(items))) - 80))
+                if roomy else MAX_EXCERPT_CHARS)
     for item in sorted(items, key=_excerpt_priority):
-        if used >= MAX_EXCERPTS:
+        if used >= max_items:
             break
-        body = _excerpt(item, MAX_EXCERPT_CHARS)
+        body = _excerpt(item, per_item)
         if not body.strip():
             continue
         block = f"\n--- {item.ref} ---\n{body}"

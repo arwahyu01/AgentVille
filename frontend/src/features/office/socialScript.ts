@@ -48,7 +48,7 @@ export type CueMap = Record<number, SocialCue>
 
 /** Task states that still own the agent's attention. A completed/failed/cancelled task is done. */
 export const OPEN_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>([
-  'pending', 'clarifying', 'awaiting_approval', 'approved', 'queued', 'running', 'reviewing',
+  'pending', 'clarifying', 'awaiting_approval', 'approved', 'queued', 'running', 'reviewing', 'awaiting_acceptance',
 ])
 
 export const WALK_SPEED = 2

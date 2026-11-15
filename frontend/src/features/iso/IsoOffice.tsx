@@ -23,7 +23,7 @@ import { claudeBubble, claudeGoals, claudeNames, freeDesks, onBreak, type Desk }
 import { buildOffice, type OfficeArt } from './officeArt'
 import { agentTag, goalFor, initialMotion, stepMotion, type MotionState } from './motion'
 
-const OPEN = new Set(['pending', 'clarifying', 'awaiting_approval', 'approved', 'queued', 'running', 'reviewing'])
+const OPEN = new Set(['pending', 'clarifying', 'awaiting_approval', 'approved', 'queued', 'running', 'reviewing', 'awaiting_acceptance'])
 
 /** Screen tint for a desk screen, keyed to the real status of whoever sits there. */
 const SCREEN_TINT: Record<Agent['status'], number> = {

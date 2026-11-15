@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.conversation_service import (ConversationError, add_message, approve_plan,
+from app.conversation_service import (ConversationError, add_message, accept_result, approve_plan,
                                       cancel_conversation, create_conversation, get_conversation,
                                       get_plan_row, list_messages, plan_history, request_revision)
 from app.database import get_db
@@ -30,11 +30,13 @@ def _read(db: Session, conv) -> ConversationRead:
 
 def _plan_read(row) -> PlanRead:
     try:
-        steps = json.loads(row.steps_json or "[]").get("steps", [])
+        data = json.loads(row.steps_json or "{}")
+        steps, workflow = data.get("steps", []), data.get("workflow", "")
     except (json.JSONDecodeError, AttributeError):
-        steps = []
+        steps, workflow = [], ""
     return PlanRead(id=row.id, conversation_id=row.conversation_id, version=row.version,
-                    status=row.status, summary=row.summary, created_at=row.created_at, steps=steps)
+                    status=row.status, summary=row.summary, created_at=row.created_at, steps=steps,
+                    workflow=workflow)
 
 
 @router.post("/conversations", response_model=ConversationRead, status_code=201)
@@ -101,6 +103,15 @@ def approve(conversation_id: int, payload: ApproveRequest, db: Session = Depends
     except ConversationError as e:
         raise _http(e)
     return _plan_read(row)
+
+
+@router.post("/conversations/{conversation_id}/accept", response_model=ConversationRead)
+def accept(conversation_id: int, db: Session = Depends(get_db)):
+    try:
+        conv = accept_result(db, conversation_id)
+    except ConversationError as e:
+        raise _http(e)
+    return _read(db, conv)
 
 
 @router.post("/conversations/{conversation_id}/revise", response_model=ConversationRead)

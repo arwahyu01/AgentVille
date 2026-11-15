@@ -1,7 +1,7 @@
 export type AgentStatus = 'idle' | 'working' | 'waiting' | 'reviewing' | 'completed' | 'failed'
 export type TaskStatus =
   | 'pending' | 'clarifying' | 'awaiting_approval' | 'approved' | 'queued'
-  | 'running' | 'reviewing' | 'completed' | 'failed' | 'cancelled'
+  | 'running' | 'reviewing' | 'awaiting_acceptance' | 'completed' | 'failed' | 'cancelled'
 
 export interface Agent {
   id: number
@@ -90,6 +90,8 @@ export interface PlanStep {
   required?: boolean
   acceptance_criteria?: string[]
   uses_tools?: boolean
+  reviewer_role?: string
+  deliverable?: string
 }
 
 export interface PlanRead {
@@ -100,6 +102,7 @@ export interface PlanRead {
   summary: string
   created_at: string
   steps: PlanStep[]
+  workflow?: string
 }
 
 export interface PlanInfo {

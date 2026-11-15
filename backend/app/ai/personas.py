@@ -9,6 +9,7 @@ claim it changed files."""
 
 from app.ai.base import Persona
 from app.plan_schema import CODING_CAPABLE_ROLES, ROLE_NAMES
+from app.workflows import WORKFLOW_HINT
 
 _BASE_INSTRUCTIONS = {
     "AI Coordinator": (
@@ -56,6 +57,22 @@ _BASE_INSTRUCTIONS = {
     "Reviewer": (
         "Check completeness and correctness of results against the original request, "
         "and identify concrete issues. "
+    ),
+    "Marketing Strategist": (
+        "Define the target audience, the core message, channels and measurable KPIs. Build on the "
+        "research artefact from the previous step and cite which finding supports each choice. "
+    ),
+    "Copywriter": (
+        "Write persuasive, on-brand copy (ads, captions, emails, landing text) that follows the "
+        "strategy artefact. Give each piece a channel label and a clear call to action. "
+    ),
+    "Fact-Checker": (
+        "Verify every claim, figure and source in the material you are given. List each claim with "
+        "a verdict (supported, unsupported, unverifiable) and why. Never invent a source. "
+    ),
+    "Tech Lead": (
+        "Decide the architecture, define the API contracts and module boundaries, split the build "
+        "into tasks for frontend and backend, and review delivered work against that design. "
     ),
 }
 
@@ -116,7 +133,13 @@ COORDINATOR_INSTRUCTIONS = (
     f"({', '.join(sorted(CODING_CAPABLE_ROLES))}); every other step stays text-only. "
     "Each step instruction must name the artefact it consumes and the artefact it delivers. "
     "Every plan needs at least one acceptance criterion. "
+    "Write criteria a reader can check by looking at the content (which sections, tables or "
+    "items must be present and agree with each other); never exact character, word or byte "
+    "counts, which writers cannot measure reliably. Do not add a separate final review or QC "
+    "step: an independent QC review always checks every step against the criteria after the "
+    "work is done. "
     "Ask instead of proposing whenever the request is too vague to satisfy the criteria. "
+    + WORKFLOW_HINT +
     "No markdown, no commentary, JSON only."
 )
 
@@ -132,8 +155,13 @@ QC_INSTRUCTIONS = (
     '"failed_steps": [int]}. '
     "Rules: verdict pass only when every criterion C1..Cn is present and met, every cited ref is "
     "in the packet, findings and evidence quote concrete details from the packet, and failed_steps "
-    "is empty. For fail, list the 0-based step indexes responsible (empty when unknown) and cite a "
-    "missing: ref where evidence is absent. No markdown, no commentary, JSON only."
+    "is empty. For fail, list the 0-based step indexes responsible (empty when unknown); cite a "
+    "missing: ref only if that exact ref is listed in the packet, otherwise just say in findings "
+    "what is absent. Judge substance, not wording: a length stated as 'about/sekitar N' is met "
+    "within 20 percent, and inventory sizes are UTF-8 bytes of the stored file including a short "
+    "header, not characters of the body. Do not fail a criterion only because you cannot see a "
+    "part the packet marks as omitted; fail it when the visible text shows it is wrong or "
+    "absent. No markdown, no commentary, JSON only."
 )
 
 MANAGER = Persona(key="manager", name="Atlas", role="AI Coordinator", instructions=PLANNER_INSTRUCTIONS)

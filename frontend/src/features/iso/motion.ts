@@ -146,6 +146,10 @@ export const ROLE_TAG: Record<string, string> = {
   'Content Creator': 'KONTEN',
   Administrator: 'ADMIN',
   Reviewer: 'QC',
+  'Marketing Strategist': 'MKT',
+  Copywriter: 'COPY',
+  'Fact-Checker': 'FACT',
+  'Tech Lead': 'LEAD',
   Housekeeping: 'OB',
   Security: 'SATPAM',
 }

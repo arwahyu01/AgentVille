@@ -49,6 +49,7 @@ class TaskRead(BaseModel):
     provider_used: str | None = None
     model_used: str | None = None
     qc_rerun_requested: bool = False
+    resume_requested: bool = False
     plan_step_index: int | None = None
     required: str = "1"
     created_at: datetime
@@ -221,6 +222,7 @@ class PlanRead(BaseModel):
     summary: str
     created_at: datetime
     steps: list[dict] = []
+    workflow: str = ""
 
 class ApproveRequest(BaseModel):
     plan_version: int

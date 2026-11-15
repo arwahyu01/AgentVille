@@ -27,6 +27,10 @@ ROLES: tuple[RoleSpec, ...] = (
     RoleSpec("Administrator", "draft formal documents and reports"),
     RoleSpec("Content Creator", "write content ideas, scripts and captions"),
     RoleSpec("Reviewer", "check completeness and correctness of delivered work"),
+    RoleSpec("Marketing Strategist", "set the strategy: audience, core message, channels and KPIs"),
+    RoleSpec("Copywriter", "write sales copy: ads, captions, emails and landing text"),
+    RoleSpec("Fact-Checker", "verify claims, figures and sources behind research"),
+    RoleSpec("Tech Lead", "decide architecture, split the build into tasks and review the code"),
 )
 
 VALID_ROLES = {role.name for role in ROLES}
@@ -42,6 +46,17 @@ class PlanStep(BaseModel):
     required: bool = True
     acceptance_criteria: list[str] = Field(default_factory=list)
     uses_tools: bool = False
+    # Workflow metadata (see app.workflows). `reviewer_role` checks this step's output before the
+    # next stage starts; `deliverable` names the artefact handed on. Free-form plans leave both empty.
+    reviewer_role: str = ""
+    deliverable: str = ""
+
+    @field_validator("reviewer_role")
+    @classmethod
+    def known_reviewer(cls, value: str) -> str:
+        if value and value not in VALID_ROLES:
+            raise ValueError(f"unknown reviewer_role {value!r}")
+        return value
 
     @field_validator("agent_role")
     @classmethod
@@ -59,6 +74,8 @@ class TaskPlan(BaseModel):
     steps: list[PlanStep] = Field(min_length=1)
     summary: str = ""
     acceptance_criteria: list[str] = Field(default_factory=list)
+    # Key of a template in app.workflows ("marketing", "app"); empty means a free-form plan.
+    workflow: str = ""
 
     @field_validator("steps")
     @classmethod

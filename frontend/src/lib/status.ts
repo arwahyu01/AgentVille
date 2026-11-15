@@ -8,6 +8,7 @@ export const statusLabel: Record<TaskStatus, string> = {
   queued: 'Antrean',
   running: 'Dikerjakan',
   reviewing: 'QC',
+  awaiting_acceptance: 'Menunggu persetujuan akhir',
   completed: 'Selesai',
   failed: 'Gagal',
   cancelled: 'Dibatalkan',

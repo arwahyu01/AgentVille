@@ -38,6 +38,7 @@ export const api = {
     request<{ models: string[] }>(`/api/ai/models${provider ? `?provider=${provider}` : ''}`),
   executeTask: (id: number, mode: 'direct' | 'plan') =>
     request<Task>(`/api/tasks/${id}/execute`, { method: 'POST', body: JSON.stringify({ mode }) }),
+  resumeTask: (id: number) => request<Task>(`/api/tasks/${id}/resume`, { method: 'POST' }),
   qcRerun: (id: number) => request<Task>(`/api/tasks/${id}/qc-rerun`, { method: 'POST' }),
   taskResult: (id: number) => request<TaskResult>(`/api/tasks/${id}/result`),
   conversations: () => request<Conversation[]>('/api/conversations'),
@@ -49,6 +50,7 @@ export const api = {
   conversationPlan: (id: number) => request<PlanInfo>(`/api/conversations/${id}/plan`),
   approvePlan: (id: number, plan_version: number) =>
     request<PlanRead>(`/api/conversations/${id}/approve`, { method: 'POST', body: JSON.stringify({ plan_version }) }),
+  acceptResult: (id: number) => request<Conversation>(`/api/conversations/${id}/accept`, { method: 'POST' }),
   revisePlan: (id: number, notes: string) =>
     request<Conversation>(`/api/conversations/${id}/revise`, { method: 'POST', body: JSON.stringify({ notes }) }),
   cancelConversation: (id: number) =>

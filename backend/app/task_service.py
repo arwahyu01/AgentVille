@@ -17,20 +17,23 @@ ALLOWED_TRANSITIONS = {
     "approved": {"queued", "cancelled", "clarifying"},
     "queued": {"running", "cancelled", "clarifying"},
     "running": {"completed", "reviewing", "failed", "cancelled", "clarifying"},
-    "reviewing": {"completed", "failed", "running"},
+    # A workflow plan reserves the final sign-off for the user: QC passed, the result waits.
+    "reviewing": {"completed", "failed", "running", "awaiting_acceptance"},
+    "awaiting_acceptance": {"completed", "clarifying", "cancelled"},
     "completed": set(),
-    "failed": {"queued", "cancelled"},
+    # "clarifying": the user asks for a different plan after a failure (revise).
+    "failed": {"queued", "cancelled", "clarifying"},
     "cancelled": set(),
 }
 
 # Everything a user can stop from the single-page console. History is never deleted:
 # "clear all tasks" only cancels what is still in flight.
 ACTIVE_STATUSES = ("pending", "clarifying", "awaiting_approval", "approved", "queued",
-                   "running", "reviewing")
+                   "running", "reviewing", "awaiting_acceptance")
 
 # States that belong to the conversation workflow; only anchors (run_mode='conversation')
 # may enter them — manual/AI tasks keep the Fase-2 subset.
-CONVERSATION_STATES = {"clarifying", "awaiting_approval", "approved", "reviewing"}
+CONVERSATION_STATES = {"clarifying", "awaiting_approval", "approved", "reviewing", "awaiting_acceptance"}
 
 class TransitionError(Exception):
     pass

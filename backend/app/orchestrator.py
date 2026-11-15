@@ -36,6 +36,37 @@ logger = logging.getLogger("agentville.orchestrator")
 __all__ = ["Orchestrator", "VALID_ROLES", "PlanStep", "TaskPlan", "extract_json"]
 
 
+# How much text one prompt may carry. Providers that take the prompt as a CLI argument stay at the
+# old 12k ceiling; Claude reads it on stdin, so finished steps can be handed on whole instead of
+# as the first few paragraphs (the cause of "brief only reaches keyword 5" failures).
+PROMPT_ROOM = {"claude": 56000}
+DEFAULT_PROMPT_ROOM = 10800
+
+
+def prompt_room(provider_name: str | None) -> int:
+    return PROMPT_ROOM.get((provider_name or "").split("/")[0], DEFAULT_PROMPT_ROOM)
+
+
+def fit_handoff(outputs: dict[int, str], deps: list[int], budget: int) -> str:
+    """Earlier results for a step, sharing `budget` characters fairly between its dependencies.
+
+    A result that fits is passed whole. One that does not keeps its start and its end with an
+    explicit marker in between, so the next step knows text is missing instead of assuming the
+    hand-off was complete."""
+    if not deps:
+        return ""
+    share = max(600, budget // len(deps))
+    parts = []
+    for dep in deps:
+        text = outputs.get(dep, "")
+        if len(text) > share:
+            head, tail = int(share * 0.7), int(share * 0.3)
+            text = (text[:head] + f"\n[... {len(text) - head - tail} karakter dipotong agar muat; "
+                    "bagian ini tidak ikut terkirim ...]\n" + text[-tail:])
+        parts.append(f"[Result of step {dep}: {text}]")
+    return "\n\n".join(parts)
+
+
 class Orchestrator(threading.Thread):
     """Background scheduler for the office.
 
@@ -659,7 +690,7 @@ class Orchestrator(threading.Thread):
                 return
             anchor.plan_json = plan_row.steps_json
 
-            children = db.query(Task).filter(Task.parent_id == anchor_id).order_by(Task.id).all()
+            children = db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).order_by(Task.id).all()
             created_here = False
             if not children:
                 created_here = True
@@ -680,7 +711,7 @@ class Orchestrator(threading.Thread):
                 add_event(db, anchor_id, "plan_created",
                           f"Plan v{plan_row.version} materialised ({plan_created})",
                           conversation_id=conv.id)
-                children = db.query(Task).filter(Task.parent_id == anchor_id).order_by(Task.id).all()
+                children = db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).order_by(Task.id).all()
             # Announce assignment so the office can seat each specialist at its station.
             for child in children:
                 idx = child.plan_step_index if child.plan_step_index is not None else 0
@@ -745,6 +776,20 @@ class Orchestrator(threading.Thread):
         completed: set[int] = set()
         remaining: set[int] = set(range(len(plan.steps)))
         with SessionLocal() as db:
+            anchor = db.get(Task, anchor_id)
+            if anchor is not None and anchor.resume_requested:
+                # Resumed after a failure: keep what already finished, run only the rest.
+                anchor.resume_requested = False
+                for index, cid in enumerate(child_ids):
+                    child = db.get(Task, cid)
+                    if child is not None and child.status == "completed" and child.result:
+                        outputs[index] = child.result
+                        completed.add(index)
+                        remaining.discard(index)
+                add_event(db, anchor_id, "run_resumed",
+                          f"Dilanjutkan: {len(completed)} langkah selesai dipertahankan, "
+                          f"{len(remaining)} dijalankan ulang", conversation_id=conv.id)
+                db.commit()
             concurrency = max_concurrency(db)
             lease = lease_seconds(db)
             policy = merge_policy(db)
@@ -847,6 +892,8 @@ class Orchestrator(threading.Thread):
                                     workspace=str(node_ws[i]) if node_ws[i] is not None else None)
             result = self._run_specialist_step(step, i, child_id, anchor_id, persona, outputs,
                                                instruction, timeout_s, cfg, node_ws[i], conversation_id)
+            result = self._peer_review(step, i, child_id, anchor_id, persona, outputs, instruction,
+                                       timeout_s, cfg, node_ws[i], conversation_id, result)
             if result is not None and result.ok and i in node_wt:
                 repo.commit_all(node_wt[i][1], f"step {i} of anchor {anchor_id}")
                 branches[i] = node_wt[i][0]
@@ -865,6 +912,76 @@ class Orchestrator(threading.Thread):
             for i in node_wt:
                 repo.remove_worktree(base_ws, node_wt[i][1])
         return outcomes
+
+    PEER_REVIEW_ROUNDS = 2
+
+    def _peer_review(self, step: PlanStep, index: int, child_id: int, anchor_id: int,
+                     persona: Persona, outputs: dict[int, str], instruction: str, timeout_s: int,
+                     cfg: dict, workspace, conversation_id: int,
+                     result: ProviderResult | None) -> ProviderResult | None:
+        """A workflow stage is checked by a different role before the next stage starts. The
+        reviewer approves or sends it back with notes (at most PEER_REVIEW_ROUNDS checks); a
+        stage that is still rejected after the last round carries its notes forward and the
+        final QC decides. Steps without a reviewer_role (free-form plans) skip all of this."""
+        if result is None or not result.ok or not step.reviewer_role:
+            return result
+        for round_no in range(1, self.PEER_REVIEW_ROUNDS + 1):
+            with SessionLocal() as db:
+                reviewer = (db.query(Agent).filter(Agent.role == step.reviewer_role)
+                            .order_by(Agent.id).first())
+                child = db.get(Task, child_id)
+                owner_id = child.agent_id if child else None
+                reviewer_id = reviewer.id if reviewer else None
+            provider = self._provider()
+            reviewer_persona = self._persona(step.reviewer_role, reviewer.name if reviewer else None,
+                                             cfg["text_model"])
+            criteria = "\n".join(f"- {c}" for c in step.acceptance_criteria) or "- follow the instruction"
+            prompt = (
+                f"Check the output of step {index} ({step.title}) by the {step.agent_role}.\n"
+                f"Step instruction:\n{step.instruction[:900]}\n\nAcceptance:\n{criteria}\n\n"
+                f"Delivered:\n{result.text[:3500]}\n\n"
+                'Reply with ONLY JSON: {"approved": true|false, "notes": "<concrete issues or why it passes>"}.')
+            reply = self._call(provider, reviewer_persona, prompt[:6000], timeout_s, anchor_id)
+            if self._cancelled(anchor_id):
+                return None
+            payload = extract_json(reply.text) if reply.ok else None
+            if payload is None or not isinstance(payload.get("approved"), bool):
+                # An unreadable check is recorded, never treated as an approval or a rejection.
+                with SessionLocal() as db:
+                    add_event(db, child_id, "peer_review",
+                              f"Pemeriksaan {step.reviewer_role} langkah {index} tidak terbaca; "
+                              "diteruskan ke QC akhir", conversation_id=conversation_id,
+                              agent_id=reviewer_id, step_index=index, actor_agent_id=reviewer_id)
+                    db.commit()
+                return result
+            approved = payload["approved"]
+            notes = redact(str(payload.get("notes", "")), 300)
+            with SessionLocal() as db:
+                add_event(db, child_id, "peer_review",
+                          f"{step.reviewer_role} {'menyetujui' if approved else 'menolak'} langkah "
+                          f"{index} (putaran {round_no}): {notes}",
+                          conversation_id=conversation_id, agent_id=reviewer_id, step_index=index,
+                          actor_agent_id=reviewer_id, recipient_agent_id=owner_id)
+                if not approved and reviewer_id and owner_id and reviewer_id != owner_id:
+                    owner = db.get(Agent, owner_id)
+                    room = room_for_role(owner.role) if owner else ""
+                    add_event(db, child_id, "review_visit",
+                              f"Catatan {step.reviewer_role} untuk langkah {index}: {notes[:160]}",
+                              conversation_id=conversation_id, agent_id=reviewer_id,
+                              step_index=index, actor_agent_id=reviewer_id,
+                              recipient_agent_id=owner_id,
+                              from_room=room_for_role(step.reviewer_role), to_room=room)
+                db.commit()
+            if approved or round_no == self.PEER_REVIEW_ROUNDS:
+                return result
+            revised = self._run_specialist_step(
+                step, index, child_id, anchor_id, persona, outputs, instruction, timeout_s, cfg,
+                workspace, conversation_id,
+                extra_prompt=f"{step.reviewer_role} sent this back. Fix these points:\n{notes}")
+            if revised is None or not revised.ok:
+                return revised
+            result = revised
+        return result
 
     def _integrate(self, i, result, branches, base_ws, conversation_id, child_ids):
         """Merge an isolated coding node's branch into the base; a conflict becomes a step
@@ -1038,18 +1155,21 @@ class Orchestrator(threading.Thread):
         # what the agent is reading/writing/running instead of only "step started".
         persona = dataclasses.replace(persona, on_action=self._action_sink(
             child_id, index, conversation_id, step_agent_id, provider_name, model))
-        context = instruction
-        if step.depends_on:
-            prior = "\n\n".join(f"[Result of step {dep}: {outputs.get(dep, '')}]" for dep in step.depends_on)
-            context = f"{instruction}\n\nEarlier results you must use:\n{prior}"[:4000]
+        # The fixed part (instruction, criteria, reviewer notes) is never cut; only the earlier
+        # results flex to fill whatever room the provider leaves.
         criteria = "\n".join(f"- {c}" for c in step.acceptance_criteria)
-        prompt = f"{step.instruction}\n\nContext:\n{context}"
+        tail = ""
         if criteria:
-            prompt += f"\n\nThis step must satisfy:\n{criteria}"
+            tail += f"\n\nThis step must satisfy:\n{criteria}"
         if extra_prompt:
-            prompt += f"\n\n{extra_prompt}"
+            tail += f"\n\n{extra_prompt[:2500]}"
+        head = f"{step.instruction}\n\nContext:\n{instruction[:1500]}"
+        room = prompt_room(provider_name) - len(persona.instructions) - 200
+        budget = max(1200, room - len(head) - len(tail) - 60)
+        context = fit_handoff(outputs, list(step.depends_on), budget)
+        prompt = head + (f"\n\nEarlier results you must use:\n{context}" if context else "") + tail
         diff_probe = (lambda: repo.capture_diff(workspace)) if (workspace and alternate) else None
-        result = self._run_specialist(provider, alternate, persona, prompt[:6000], timeout_s,
+        result = self._run_specialist(provider, alternate, persona, prompt, timeout_s,
                                       anchor_id, diff_probe)
         if not result.provider:
             result = dataclasses.replace(result, provider=provider_name, model=model)
@@ -1124,7 +1244,7 @@ class Orchestrator(threading.Thread):
             if anchor.status == "queued":
                 transition(db, anchor, "running", "QC rerun started", conversation_id=conv.id)
             anchor.plan_json = plan_row.steps_json
-            children = db.query(Task).filter(Task.parent_id == anchor_id).order_by(Task.id).all()
+            children = db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).order_by(Task.id).all()
             outputs = {c.plan_step_index: c.result for c in children
                        if c.plan_step_index is not None and c.result}
             instruction = f"{anchor.title}\n{anchor.description}".strip()
@@ -1144,7 +1264,7 @@ class Orchestrator(threading.Thread):
         with SessionLocal() as db:
             anchor = db.get(Task, anchor_id)
             transition(db, anchor, "reviewing", "QC review started")
-            participants = sorted({c.agent_id for c in db.query(Task).filter(Task.parent_id == anchor_id).all()
+            participants = sorted({c.agent_id for c in db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).all()
                                    if c.agent_id})
             names = ", ".join(filter(None, (db.get(Agent, aid).name if db.get(Agent, aid) else None
                                             for aid in participants))) or "n/a"
@@ -1155,7 +1275,7 @@ class Orchestrator(threading.Thread):
                 seat_agent(db, aid, target_room="meeting")
             artifact_paths = [anchor.artifact_path] if anchor.artifact_path else []
             artifact_paths.extend(
-                c.artifact_path for c in db.query(Task).filter(Task.parent_id == anchor_id).all()
+                c.artifact_path for c in db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).all()
                 if c.artifact_path)
             db.commit()
         criteria = list(plan.acceptance_criteria)
@@ -1166,6 +1286,8 @@ class Orchestrator(threading.Thread):
         ids = criterion_ids(criteria)
         provider = self._provider()
         provider_name = getattr(provider, "name", "") or cfg["provider"]
+        # A rotation wrapper reports "auto"; the configured engine is what sets the prompt room.
+        room_name = cfg["provider"] if provider_name in ("auto", "") else provider_name
         qc_persona = dataclasses.replace(QC_REVIEWER, model=cfg["text_model"])
         iteration = 0
         while True:
@@ -1177,11 +1299,16 @@ class Orchestrator(threading.Thread):
                 + "\n\nAcceptance criteria (report every id exactly once):\n"
                 + "\n".join(f"{cid}. {criterion[:240]}"
                             for cid, criterion in zip(ids, criteria))
-                + "\n\nDelivered step outputs (text only, truncated):\n" + summary[:1200]
+                + "\n\nDelivered step outputs (text only, truncated):\n"
+                + summary[:1200 if prompt_room(room_name) <= DEFAULT_PROMPT_ROOM else 6000]
                 + "\n\n"
             )
-            # Keep the whole provider prompt (persona + task) inside the 12k CLI cap.
-            budget = max(3200, min(6500, 10800 - len(head)))
+            # Keep the whole prompt inside what the provider accepts. Claude takes far more, so QC
+            # reads real excerpts instead of fragments it cannot verify.
+            if prompt_room(room_name) > DEFAULT_PROMPT_ROOM:
+                budget = max(6500, min(48000, prompt_room(room_name) - len(head) - 3500))
+            else:
+                budget = max(3200, min(6500, 10800 - len(head)))
             evidence = build_evidence(
                 workspace=workspace,
                 artifact_paths=artifact_paths,
@@ -1249,6 +1376,17 @@ class Orchestrator(threading.Thread):
                     if workspace is not None:
                         self._store_diff_artifact(anchor_id, status, diff)
                     save_result(db, anchor, summary)
+                    if conversation_service.needs_user_gate(plan, "final"):
+                        transition(db, anchor, "awaiting_acceptance",
+                                   "QC lulus; hasil menunggu persetujuan akhir Anda",
+                                   event_type="gate_waiting", conversation_id=conversation_id)
+                        leader = self._leader(db)
+                        if leader is not None:
+                            say(db, anchor_id, leader,
+                                f"QC lulus untuk {anchor.title[:100]}. Hasil siap ditinjau; "
+                                "menunggu persetujuan akhir Anda.", conversation_id=conversation_id)
+                        self._end_meeting(db, anchor_id, conversation_id, participants)
+                        return
                     transition(db, anchor, "completed", "QC passed")
                     self._report_done(db, anchor_id, conversation_id,
                                       f"Selesai: {anchor.title[:120]}. QC lulus dan semua langkah "
@@ -1331,12 +1469,12 @@ class Orchestrator(threading.Thread):
 
     def _required_children_ok(self, anchor_id: int) -> bool:
         with SessionLocal() as db:
-            children = db.query(Task).filter(Task.parent_id == anchor_id).all()
+            children = db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).all()
             return all(c.status == "completed" for c in children if c.required != "0")
 
     def _children_by_step(self, anchor_id: int) -> dict[int, int]:
         with SessionLocal() as db:
-            return {c.plan_step_index: c.id for c in db.query(Task).filter(Task.parent_id == anchor_id).all()
+            return {c.plan_step_index: c.id for c in db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).all()
                     if c.plan_step_index is not None}
 
     def _store_diff_artifact(self, anchor_id: int, status: str, diff: str) -> None:

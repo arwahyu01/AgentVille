@@ -164,3 +164,20 @@ def test_missing_workspace_still_returns_artifact_evidence(tmp_path):
         project_root=tmp_path)
     assert evidence.refs == frozenset({"artifact:task-1.md"})
     assert "EVIDENCE INVENTORY" in evidence.text
+
+
+def test_roomy_packet_shows_a_whole_report_not_just_its_summary(tmp_path):
+    """Regression: a report with a 'Ringkasan' heading was reduced to its first 140 characters
+    plus the summary, hiding every table the reviewer had to verify."""
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    body = ("# Research gap\n\n| Tema | Gap | RQ | Metode | Luaran |\n|---|---|---|---|---|\n"
+            + "".join(f"| T{i} | gap {i} | RQ-{i} | survei | prototipe |\n" for i in range(40))
+            + "\n## Ringkasan\n- ringkas\n")
+    (art / "task-27.md").write_text(body, encoding="utf-8")
+    roomy = build_evidence(workspace=None, artifact_paths=["task-27.md"],
+                           artifact_dir=art, project_root=tmp_path, budget=40000)
+    assert "| T39 | gap 39 | RQ-39 | survei | prototipe |" in roomy.text
+    tight = build_evidence(workspace=None, artifact_paths=["task-27.md"],
+                           artifact_dir=art, project_root=tmp_path, budget=4000)
+    assert len(tight.text) <= 4000          # argv-bound providers keep the small packet

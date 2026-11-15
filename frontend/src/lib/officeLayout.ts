@@ -143,6 +143,10 @@ export const ROLE_ROOM: Record<string, string> = {
   Administrator: 'admin',
   Reviewer: 'admin',
   'AI Coordinator': 'admin',
+  'Marketing Strategist': 'analyst',
+  'Fact-Checker': 'analyst',
+  Copywriter: 'design',
+  'Tech Lead': 'dev',
   // Simulation-only staff (never planner roles; mirrors rooms.py OPERATIONAL_ROLES).
   Housekeeping: 'pantry',
   Security: 'security',

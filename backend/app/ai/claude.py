@@ -28,7 +28,8 @@ from app.agent_actions import actions_from_stream_line
 from app.ai.base import CancelCheck, Persona, ProviderResult, is_recoverable
 from app.tools.procs import kill_tree, wait_for_drain
 
-MAX_PROMPT_CHARS = 12000
+# The prompt goes to the CLI on stdin, so unlike the argv-based providers it is not bound by 12k.
+MAX_PROMPT_CHARS = 60000
 # Aliases (sonnet, opus, haiku, fable) or full model ids such as claude-sonnet-5-5.
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._\-\[\]]{1,80}$")
 CODING_TOOLS = "Read,Write,Edit,Glob,Grep,Bash"

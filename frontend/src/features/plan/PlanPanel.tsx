@@ -3,7 +3,7 @@ import { PencilLine, Workflow, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { Conversation, PlanInfo } from '../../types'
 
-const REVISABLE = ['clarifying', 'awaiting_approval', 'approved', 'queued', 'running']
+const REVISABLE = ['clarifying', 'awaiting_approval', 'approved', 'queued', 'running', 'awaiting_acceptance']
 
 /** Read-only view of the plan the leader is executing. Approval is automatic, so this panel
  * explains the delegation instead of gating it; the only action is a revision request. */
@@ -52,7 +52,7 @@ export default function PlanPanel({ conversation, refreshKey, onAction, onError 
   return (
     <div className="plan-panel" data-testid="plan-panel">
       <div className="panel-heading small">
-        <div><h3><Workflow size={14} /> Rencana kerja</h3><p>Disetujui otomatis oleh pimpinan · langkah dibagi per tupoksi.</p></div>
+        <div><h3><Workflow size={14} /> Rencana kerja</h3><p>{plan?.current?.workflow ? 'Alur baku · Anda menyetujui rencana dan hasil akhir.' : 'Disetujui otomatis oleh pimpinan · langkah dibagi per tupoksi.'}</p></div>
       </div>
       {current == null && <p className="plan-empty">Belum ada rencana — pimpinan masih mengklarifikasi permintaan.</p>}
       {current && (
@@ -67,7 +67,7 @@ export default function PlanPanel({ conversation, refreshKey, onAction, onError 
               <li key={index}>
                 <strong>{index}. {step.title}</strong>
                 <span>{step.instruction}</span>
-                <em>{step.agent_role}{step.uses_tools ? ' · menulis file' : ''}{step.depends_on.length ? ` · setelah ${step.depends_on.join(', ')}` : ''}</em>
+                <em>{step.agent_role}{step.reviewer_role ? ` → diperiksa ${step.reviewer_role}` : ''}{step.deliverable ? ` · hasil: ${step.deliverable}` : ''}{step.uses_tools ? ' · menulis file' : ''}{step.depends_on.length ? ` · setelah ${step.depends_on.join(', ')}` : ''}</em>
                 {step.acceptance_criteria && step.acceptance_criteria.length > 0 && (
                   <ul className="plan-criteria">{step.acceptance_criteria.map((c) => <li key={c}>{c}</li>)}</ul>
                 )}

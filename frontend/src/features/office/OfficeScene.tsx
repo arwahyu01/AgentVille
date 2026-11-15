@@ -518,7 +518,7 @@ function AgentDialog({ agent, brief, room, target, onClose }: {
 const TASK_STATUS_ID: Record<string, string> = {
   pending: 'menunggu', clarifying: 'klarifikasi', awaiting_approval: 'menunggu persetujuan',
   approved: 'disetujui', queued: 'dalam antrean', running: 'berjalan',
-  reviewing: 'ditinjau', completed: 'selesai', failed: 'gagal', cancelled: 'dibatalkan',
+  reviewing: 'ditinjau', awaiting_acceptance: 'menunggu persetujuan akhir', completed: 'selesai', failed: 'gagal', cancelled: 'dibatalkan',
 }
 
 function localAgentReply(agent: Agent, brief: WorkBrief, question: string): string {

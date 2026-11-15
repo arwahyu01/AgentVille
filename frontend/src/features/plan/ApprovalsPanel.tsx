@@ -12,6 +12,7 @@ import type { Agent, Conversation, Task } from '../../types'
  */
 type Item =
   | { key: string; kind: 'plan'; conversation: Conversation }
+  | { key: string; kind: 'accept'; conversation: Conversation }
   | { key: string; kind: 'failed-run'; task: Task }
   | { key: string; kind: 'stuck-step'; task: Task }
 
@@ -19,6 +20,7 @@ export function approvalItems(tasks: Task[], conversations: Conversation[]): Ite
   const items: Item[] = []
   for (const conv of conversations) {
     if (conv.status === 'awaiting_approval') items.push({ key: `plan-${conv.id}`, kind: 'plan', conversation: conv })
+    if (conv.status === 'awaiting_acceptance') items.push({ key: `accept-${conv.id}`, kind: 'accept', conversation: conv })
   }
   for (const task of tasks) {
     if (task.status !== 'failed') continue
@@ -70,7 +72,7 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
       <ul className="approvals-list">
         {items.map((item) => {
           const task = 'task' in item ? item.task : null
-          const title = item.kind === 'plan' ? item.conversation.title : task?.title ?? ''
+          const title = item.kind === 'plan' || item.kind === 'accept' ? item.conversation.title : task?.title ?? ''
           return (
             <li key={item.key} className={`approval-row ${item.kind}`}>
               <div className="approval-head">
@@ -79,6 +81,7 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
                   <strong>{title}</strong>
                   <span>
                     {item.kind === 'plan' && `Rencana v${item.conversation.current_plan_version} menunggu keputusan`}
+                    {item.kind === 'accept' && 'QC lulus — hasil menunggu persetujuan akhirmu'}
                     {item.kind === 'failed-run' && 'Pekerjaan berhenti — pimpinan minta arahan'}
                     {item.kind === 'stuck-step' && `Langkah ${task?.plan_step_index ?? '?'} macet, perlu pengganti`}
                   </span>
@@ -96,6 +99,18 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
                   </button>
                 </div>
               )}
+              {item.kind === 'accept' && (
+                <div className="approval-actions">
+                  <button className="primary-button compact" disabled={busy === item.key}
+                          onClick={() => void run(item.key, () => api.acceptResult(item.conversation.id))}>
+                    <CheckCircle2 size={14} /> Terima hasil
+                  </button>
+                  <button className="secondary-button compact" disabled={busy === item.key}
+                          onClick={() => void run(item.key, () => api.revisePlan(item.conversation.id, 'Perlu perbaikan sebelum diterima'))}>
+                    <RefreshCw size={13} /> Minta revisi
+                  </button>
+                </div>
+              )}
               {item.kind === 'failed-run' && task && (
                 <>
                   <form className="approval-notes" onSubmit={(e) => {
@@ -110,6 +125,11 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
                     </button>
                   </form>
                   <div className="approval-actions">
+                    <button className="primary-button compact" disabled={busy === item.key}
+                            title="Lanjutkan dari yang sudah selesai: langkah gagal diulang, hasil lain dipertahankan"
+                            onClick={() => void run(item.key, () => api.resumeTask(task.id))}>
+                      <RefreshCw size={13} /> Lanjutkan
+                    </button>
                     <button className="secondary-button compact" disabled={busy === item.key}
                             onClick={() => void run(item.key, () => api.qcRerun(task.id))}>
                       <ShieldCheck size={13} /> QC ulang
@@ -132,6 +152,13 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
                           onClick={() => void run(item.key, () => api.reassignTask(task.id, Number(reassign[task.id]), notes.trim()))}>
                     <UserRoundCog size={13} /> Alihkan
                   </button>
+                  {task.parent_id != null && (
+                    <button className="secondary-button compact" disabled={busy === item.key}
+                            title="Ulangi langkah ini dengan pemilik yang sama; langkah selesai dipertahankan"
+                            onClick={() => void run(item.key, () => api.resumeTask(task.parent_id as number))}>
+                      <RefreshCw size={13} /> Lanjutkan
+                    </button>
+                  )}
                 </div>
               )}
             </li>

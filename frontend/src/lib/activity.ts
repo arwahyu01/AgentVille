@@ -106,7 +106,7 @@ export function newestMotionEvent(agentId: number, events: StreamEvent[]): Strea
  * The values are eye-pleasing stops along the real lifecycle, not a claim of elapsed work. */
 const STATUS_PROGRESS: Record<TaskStatus, number> = {
   pending: 0.08, clarifying: 0.2, awaiting_approval: 0.34, approved: 0.46,
-  queued: 0.56, running: 0.74, reviewing: 0.9, completed: 1, failed: 1, cancelled: 1,
+  queued: 0.56, running: 0.74, reviewing: 0.9, awaiting_acceptance: 0.96, completed: 1, failed: 1, cancelled: 1,
 }
 
 /** The task an agent is actually carrying: its most recent open assignment, else the freshest one. */

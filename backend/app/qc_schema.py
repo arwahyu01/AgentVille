@@ -105,6 +105,12 @@ def validate_qc_payload(
         )
 
     unknown_artifacts = [ref for ref in verdict.artifacts_checked if ref not in artifact_refs]
+    if unknown_artifacts and verdict.verdict == "fail":
+        # A fail stays a fail either way. Throwing the whole verdict away over an invented ref
+        # also threw away its findings and failed_steps, so no revision could run.
+        kept = [ref for ref in verdict.artifacts_checked if ref in artifact_refs]
+        verdict.artifacts_checked = kept or ["missing:evidence"]
+        unknown_artifacts = []
     if unknown_artifacts:
         raise ValueError(
             "artifacts_checked cites files that were not in the evidence inventory: "

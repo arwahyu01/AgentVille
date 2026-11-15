@@ -90,6 +90,41 @@ def execute_task(task_id: int, payload: ExecuteRequest, db: Session = Depends(ge
         raise HTTPException(status_code=409, detail=str(e))
     return task
 
+@router.post("/tasks/{task_id}/resume", response_model=TaskRead)
+def resume_task(task_id: int, db: Session = Depends(get_db)):
+    """Continue a failed conversation request instead of starting over.
+
+    Steps that already finished keep their results. Steps that failed or never ran are run again,
+    and if the failure was the QC verdict its findings go back to the responsible steps first.
+    """
+    if not settings_store.ai_enabled(db):
+        raise HTTPException(status_code=409, detail="AI engine is disabled. Enable it in AI settings first.")
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.parent_id is not None or task.run_mode != "conversation":
+        raise HTTPException(status_code=422, detail="Only a failed request can be resumed")
+    if task.status != "failed":
+        raise HTTPException(status_code=409, detail=f"Only a failed request can be resumed, not {task.status}")
+    conv = db.get(Conversation, task.conversation_id) if task.conversation_id else None
+    plan_row = (db.query(Plan).filter(Plan.conversation_id == conv.id,
+                                      Plan.version == conv.current_plan_version).first()
+                if conv else None)
+    if plan_row is None or plan_row.status != "approved":
+        raise HTTPException(status_code=409, detail="No approved plan version to continue")
+    for child in db.query(Task).filter(Task.parent_id == task.id, Task.plan_step_index.isnot(None)).all():
+        if child.status in ("failed", "cancelled"):
+            child.status = "pending"
+            child.lease_owner = None
+    task.resume_requested = True
+    try:
+        task = transition(db, task, "queued", "Dilanjutkan oleh user", "resume_requested")
+    except TransitionError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+    return task
+
+
 @router.post("/tasks/{task_id}/qc-rerun", response_model=TaskRead)
 def rerun_qc(task_id: int, db: Session = Depends(get_db)):
     """Queue a QC-only rerun for a failed conversation anchor.

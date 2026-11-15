@@ -83,6 +83,10 @@ export const ROLE_SHIRT: Record<string, string> = {
   'Content Creator': '#b07f5f',
   Administrator: '#9a8a5c',
   Reviewer: '#7f6ea8',
+  'Marketing Strategist': '#c0764f',
+  Copywriter: '#b8946a',
+  'Fact-Checker': '#5f8f9a',
+  'Tech Lead': '#5a7aa6',
 }
 
 /** A service-desk vest, worn by whoever the backend actually stationed in Customer Service. */

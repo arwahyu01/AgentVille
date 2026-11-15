@@ -667,3 +667,74 @@ def test_no_reviewer_on_the_roster_means_no_visit_is_announced(conv_db):
     assert state(conv_db, anchor_id) == "completed"
     with conv_db() as db:
         assert db.query(TaskEvent).filter(TaskEvent.event_type == "review_visit").count() == 0
+
+
+def test_resume_after_failed_qc_keeps_finished_steps(conv_db, client):
+    """A failed request can be continued: finished steps are not run again, QC runs again."""
+    with conv_db() as db:
+        set_setting(db, "ai_retry_max", "0")
+        db.commit()
+    conv_id, anchor_id = drive_to_approval(conv_db)
+    tick.provider = FakeProvider([
+        ProviderResult(ok=True, text="a"), ProviderResult(ok=True, text="b"), QC_FAIL])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "failed"
+
+    assert client.post(f"/api/tasks/{anchor_id}/resume").status_code == 200
+    tick.provider = FakeProvider([QC_PASS])          # one call only: no step may run again
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    assert len(tick.provider.calls) == 1
+    with conv_db() as db:
+        from app.models import TaskEvent
+        assert db.query(TaskEvent).filter_by(task_id=anchor_id, event_type="run_resumed").count() == 1
+
+
+def test_resume_reruns_only_the_failed_step(conv_db, client):
+    conv_id, anchor_id = drive_to_approval(conv_db)
+    with conv_db() as db:
+        kids = db.query(Task).filter(Task.parent_id == anchor_id).order_by(Task.plan_step_index).all()
+        ok_id, bad_id = kids[0].id, kids[1].id
+    tick.provider = FakeProvider([ProviderResult(ok=True, text="first done")] +
+                                 [ProviderResult(ok=False, error="boom")] * 6)
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "failed"
+    with conv_db() as db:
+        assert db.get(Task, ok_id).status == "completed"
+
+    client.post(f"/api/tasks/{anchor_id}/resume")
+    tick.provider = FakeProvider([ProviderResult(ok=True, text="second done"), QC_PASS])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "completed"
+    assert len(tick.provider.calls) == 2          # one step + QC, never the finished step
+    with conv_db() as db:
+        assert db.get(Task, ok_id).result and "first done" in db.get(Task, ok_id).result
+        assert "second done" in db.get(Task, bad_id).result
+
+
+def test_resume_refused_unless_failed(conv_db, client):
+    conv_id, anchor_id = drive_to_approval(conv_db)
+    assert client.post(f"/api/tasks/{anchor_id}/resume").status_code == 409
+
+
+def test_revise_a_failed_request_redrafts_and_runs_new_steps(conv_db, client):
+    with conv_db() as db:
+        set_setting(db, "ai_retry_max", "0")
+        db.commit()
+    conv_id, anchor_id = drive_to_approval(conv_db)
+    tick.provider = FakeProvider([ProviderResult(ok=True, text="a"), ProviderResult(ok=True, text="b"), QC_FAIL])
+    tick(conv_db)
+    assert state(conv_db, anchor_id) == "failed"
+
+    r = client.post(f"/api/conversations/{conv_id}/revise", json={"notes": "ulangi dari awal"})
+    assert r.status_code == 200, r.text
+    assert state(conv_db, anchor_id) == "clarifying"
+    tick.provider = FakeProvider([propose_json(), ProviderResult(ok=True, text="a2"),
+                                  ProviderResult(ok=True, text="b2"), QC_PASS])
+    tick(conv_db)          # Coordinator redrafts and the leader signs off
+    tick(conv_db)          # the new plan runs
+    assert state(conv_db, anchor_id) == "completed"
+    with conv_db() as db:
+        live = db.query(Task).filter(Task.parent_id == anchor_id, Task.plan_step_index.isnot(None)).all()
+        assert sorted(c.plan_step_index for c in live) == [0, 1]
+        assert all("2" in c.result for c in live)

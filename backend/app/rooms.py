@@ -37,6 +37,10 @@ ROLE_ROOM: dict[str, str] = {
     "Administrator": "admin",
     "Reviewer": "admin",
     "AI Coordinator": "admin",
+    "Marketing Strategist": "analyst",
+    "Fact-Checker": "analyst",
+    "Copywriter": "design",
+    "Tech Lead": "dev",
     # Simulation-only staff. Not in plan_schema.ROLES, so the planner never binds a
     # project step to them; their rooms are their duty posts.
     "Housekeeping": "pantry",

@@ -63,6 +63,9 @@ class Task(Base):
     # A QC-only rerun is requested for a failed anchor: no step revision, no landing edits,
     # just a fresh evidence-backed review of the work that already exists.
     qc_rerun_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # "Lanjutkan": a failed anchor is picked up again. Finished steps are kept, failed ones run
+    # again, and a failed QC sends its findings back to the responsible steps first.
+    resume_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     agent: Mapped[Agent | None] = relationship(back_populates="tasks")

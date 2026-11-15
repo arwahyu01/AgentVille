@@ -66,6 +66,7 @@ COLUMN_MIGRATIONS = {
         "branch": "TEXT DEFAULT ''",
         "worktree_path": "TEXT DEFAULT ''",
         "qc_rerun_requested": "INTEGER DEFAULT 0",
+        "resume_requested": "INTEGER DEFAULT 0",
     },
     "qc_reviews": {
         "artifacts_json": "TEXT DEFAULT ''",
@@ -134,6 +135,10 @@ DEFAULT_AGENTS = [
     ("Blaze", "Frontend Developer", -1.4, 5.55),
     ("Forge", "Backend Developer", 1.4, 5.55),
     ("Gauge", "QA Engineer", 4.2, 5.55),
+    ("Compass", "Marketing Strategist", 7.0, 2.65),
+    ("Echo", "Copywriter", 7.0, 5.55),
+    ("Verity", "Fact-Checker", 7.0, -0.25),
+    ("Anvil", "Tech Lead", 4.2, 8.2),
     # Office staff for the simulation only. These roles are deliberately absent from
     # plan_schema.ROLES, so the planner can never bind a project step to them and no
     # real PC resource is touched by their "work".
