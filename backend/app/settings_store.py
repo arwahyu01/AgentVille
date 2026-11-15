@@ -52,8 +52,8 @@ def rotate_models_enabled(db: Session) -> bool:
     return get_setting(db, "rotate_models_enabled") != "0"
 
 def rotate_models_max(db: Session) -> int:
-    """How many other engines a single step may try before giving up."""
-    return _int_setting(db, "rotate_models_max", 4, 1, 20)
+    """How many other engines a single call may try before giving up."""
+    return _int_setting(db, "rotate_models_max", 4, 1, 100)
 
 def ai_retry_max(db: Session) -> int:
     try:

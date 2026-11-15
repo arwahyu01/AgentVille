@@ -91,7 +91,8 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
         </label>
         <div className="ai-model-field">
           <span>Rotate max</span>
-          <input aria-label="Rotate max" type="number" min={1} max={20} disabled={busy || !(config.rotate_models_enabled ?? true)}
+          <input aria-label="Rotate max" type="number" min={1} max={100} disabled={busy || !(config.rotate_models_enabled ?? true)}
+                 title="Berapa mesin cadangan yang dicoba berurutan (model free didahulukan) sampai ada yang mau menerima pekerjaan."
                  value={config.rotate_models_max ?? 4}
                  onChange={(e) => void patch({ rotate_models_max: Number(e.target.value) })} />
         </div>

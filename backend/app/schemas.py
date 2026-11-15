@@ -121,7 +121,7 @@ class AIConfigPatch(BaseModel):
     retry_max: int | None = Field(default=None, ge=0, le=3)
     agent_chat_mode: Literal["static", "milestone", "full"] | None = None
     rotate_models_enabled: bool | None = None
-    rotate_models_max: int | None = Field(default=None, ge=1, le=20)
+    rotate_models_max: int | None = Field(default=None, ge=1, le=100)
 
 class TaskEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
