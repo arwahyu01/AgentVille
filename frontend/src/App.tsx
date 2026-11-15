@@ -12,6 +12,7 @@ import ResultStage from './features/result/ResultStage'
 import { latestByAgent } from './lib/activity'
 import { isActionEvent, latestActionByAgent } from './features/iso/actions'
 import { latestErrandByAgent } from './features/iso/errands'
+import { isPlanBriefing } from './features/iso/briefing'
 import { useEventStream } from './lib/sse'
 import { api } from './lib/api'
 import { isActive, statusLabel } from './lib/status'
@@ -45,6 +46,8 @@ export default function App() {
   const [journal, setJournal] = useState<StreamEvent[]>([])
   const [actions, setActions] = useState<Record<number, StreamEvent>>({})
   const [errands, setErrands] = useState<Record<number, StreamEvent>>({})
+  // Newest plan-briefing frame; the 2D office replays the briefing from it for a few seconds.
+  const [briefing, setBriefing] = useState<StreamEvent | null>(null)
   const [convKey, setConvKey] = useState(0)
   const lastStreamRefresh = useRef(0)
 
@@ -73,6 +76,7 @@ export default function App() {
     setJournal((current) => [...current.slice(-19), event])
     if (event.kind === 'task') {
       setErrands((current) => latestErrandByAgent(current, event))
+      if (isPlanBriefing(event)) setBriefing(event)
       const agent = agents.find((a) => a.id === event.agentId)
       const task = tasks.find((t) => t.id === event.taskId)
       setTeam((current) => pushTeam(current, {
@@ -305,7 +309,7 @@ export default function App() {
               </button>
             </div>
             <OfficeScene agents={agents} tasks={tasks} selectedId={selectedAgent} onSelect={setSelectedAgent}
-                        activity={agentActivity} errands={errands} meetingTopic={meetingTopic} />
+                        activity={agentActivity} errands={errands} briefing={briefing} meetingTopic={meetingTopic} />
           </section>
         </div>
 

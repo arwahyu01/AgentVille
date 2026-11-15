@@ -71,7 +71,7 @@ def _plan_of(row: Plan | None) -> TaskPlan | None:
 
 
 def _start_plan_meeting(db: Session, conv: Conversation, anchor: Task, row: Plan, plan: TaskPlan) -> None:
-    """While a plan waits for the user's decision, the people it involves gather in the meeting
+    """When a plan is proposed the people it involves are briefed together in the meeting
     room. The journal frame also sets the topic shown on the room's big screen."""
     people = _plan_participants(db, plan)
     if not people:
@@ -79,7 +79,7 @@ def _start_plan_meeting(db: Session, conv: Conversation, anchor: Task, row: Plan
     names = ", ".join(a.name for a in people)
     topic = (row.summary or anchor.title or "rencana").strip().replace("\n", " ")
     add_event(db, anchor.id, "meeting_started",
-              f"Rencana v{row.version}: {topic[:60]} (menunggu persetujuan · peserta: {names})",
+              f"Rencana v{row.version}: {topic[:60]} (briefing tim · peserta: {names})",
               conversation_id=conv.id, to_room="meeting")
     for agent in people:
         seat_agent(db, agent.id, target_room="meeting")

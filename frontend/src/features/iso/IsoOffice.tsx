@@ -2,7 +2,7 @@
  *  local social cues — drawn as a painted diorama with chibi figures, in the style of an office
  *  management game. Rooms, desks and routes come from `officeLayout.ts`, so a person sits at the
  *  same desk and walks the same corridor in both renderers. */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Application, Container } from 'pixi.js'
 import { poseFor, pulseAge, stationSlots, taskOfAgent } from '../../lib/activity'
 import { ROOMS, ROOM_ORDER, FLOOR, OPERATIONAL_ROLES } from '../../lib/officeLayout'
@@ -17,6 +17,7 @@ import { Avatar, bubbleLine, lookForAgent, lookForClaude, type AlertKind } from 
 import { actionFor } from './actions'
 import { breakGoalFor, errandFor } from './errands'
 import type { MotionGoal } from './motion'
+import { briefingActive, briefingFor, briefingGoal, type Briefing } from './briefing'
 import { gestureFor, isBreakGoal, isPresenter, presenterGoal } from './poses'
 import { claudeBubble, claudeGoals, claudeNames, freeDesks, onBreak, type Desk } from './claudeSeats'
 import { buildOffice, type OfficeArt } from './officeArt'
@@ -55,6 +56,8 @@ interface Live {
   onSelect: (id: number) => void
   onStaffTalk: (variant: StaffVariant) => void
   errands: Record<number, StreamEvent>
+  briefing: Briefing | null
+  meetingTopic?: string
   lastTasks: Record<number, Task | undefined>
   claude: ClaudeSession[]
   claudeNames: Record<string, string>
@@ -72,7 +75,7 @@ interface Camera {
   focus: string | null
 }
 
-export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClearSelection, activity, errands, meetingTopic, onStaffTalk, qa }: {
+export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClearSelection, activity, errands, briefing, meetingTopic, onStaffTalk, leading, qa }: {
   agents: Agent[]
   tasks: Task[]
   selectedId: number | null
@@ -81,8 +84,12 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
   activity: Record<number, StreamEvent>
   /** Newest handoff / review-visit frame per acting agent. */
   errands: Record<number, StreamEvent>
+  /** Newest plan-briefing frame, replayed as a short meeting. */
+  briefing: StreamEvent | null
   meetingTopic?: string
   onStaffTalk: (variant: StaffVariant) => void
+  /** Rendered first in the top bar (the 2D/3D switch), so the bar lays itself out in one row. */
+  leading?: ReactNode
   qa?: boolean
 }) {
   const host = useRef<HTMLDivElement>(null)
@@ -106,6 +113,7 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
     for (const a of agents) out[a.id] = taskOfAgent(a.id, tasks)
     return out
   }, [agents, tasks])
+  const briefingPlan = useMemo(() => briefingFor(briefing, agents), [briefing, agents])
   const [claude, setClaude] = useState<ClaudeSession[]>([])
   const [claudeSelected, setClaudeSelected] = useState<string | null>(null)
   const desks = useMemo(() => freeDesks(agents, slots), [agents, slots])
@@ -126,8 +134,8 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
     return () => { alive = false; window.clearInterval(timer) }
   }, [])
 
-  const live = useRef<Live>({ agents, slots, cues, activity, errands, lastTasks, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude })
-  live.current = { agents, slots, cues, activity, errands, lastTasks, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude }
+  const live = useRef<Live>({ agents, slots, cues, activity, errands, lastTasks, briefing: briefingPlan, meetingTopic, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude })
+  live.current = { agents, slots, cues, activity, errands, lastTasks, briefing: briefingPlan, meetingTopic, taskIds, selectedId, size, onSelect, onStaffTalk, claude, claudeNames: names, desks, claudeSelected, onClaude }
   const camera = useRef<Camera>({ view: { scale: 1, x: 0, y: 0 }, target: null, focus: null })
   const artRef = useRef<OfficeArt | null>(null)
   const dragged = useRef(false)
@@ -271,6 +279,11 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
         world.scale.set(cam.view.scale)
         world.position.set(cam.view.x, cam.view.y)
 
+        const activeBriefing = briefingActive(d.briefing, now) ? d.briefing : null
+        // The meeting screen shows the briefing topic while it is replayed, else the live topic.
+        const screenText = activeBriefing ? activeBriefing.topic : (d.meetingTopic?.trim() || 'Ruang rapat\nbelum ada agenda')
+        if (art.meetingText.text !== screenText) art.meetingText.text = screenText
+
         // Roster sync.
         const ids = new Set(d.agents.map((a) => a.id))
         for (const [id, entry] of avatars) {
@@ -299,10 +312,12 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
           // Priority: a trip replayed from a real handoff/review frame, then a local social cue,
           // then the after-work break, then the desk the backend assigned.
           const errand = errandFor(d.errands[agent.id], d.agents, d.slots, now)
+          // The plan briefing replayed from its journal frame outranks everything but a trip.
+          const bGoal = !errand && activeBriefing ? briefingGoal(activeBriefing, agent.id) : null
           const base = cue ? goalFor(agent, slot, cue) : breakGoalFor(agent, d.lastTasks[agent.id], now) ?? goalFor(agent, slot)
           // While a plan waits in the meeting room the Coordinator stands up beside the screen.
-          const presenting = !errand && !cue && isPresenter(agent, base)
-          const goal = errand?.goal ?? (presenting ? presenterGoal() : base)
+          const presenting = !errand && (activeBriefing?.leaderId === agent.id || (!cue && !bGoal && isPresenter(agent, base)))
+          const goal = errand?.goal ?? bGoal ?? (presenting ? presenterGoal() : base)
           advance(motion, goal, dt)
           goalKeys[agent.id] = `${goal.key}|route:${motion.route.length}`
           avatar.setCarrying(!!errand?.carrying)
@@ -479,7 +494,13 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
   return (
     <div className="iso-office">
       <div ref={host} className="iso-host" />
-      <nav className="iso-rooms" aria-label="Pilih ruangan">
+      <div className="iso-topbar">
+      {leading}
+      <nav
+        className="iso-rooms" aria-label="Pilih ruangan"
+        // A mouse wheel scrolls the chips sideways when they do not all fit.
+        onWheel={(e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY }}
+      >
         <button type="button" className={focus === null ? 'active' : ''} onClick={() => setFocus(null)}>Semua</button>
         {ROOM_ORDER.map((id) => (
           <button key={id} type="button" className={focus === id ? 'active' : ''} onClick={() => setFocus(id)}>
@@ -500,6 +521,7 @@ export default function IsoOffice({ agents, tasks, selectedId, onSelect, onClear
         <button type="button" aria-label="Perbesar" onClick={() => zoomBy(1.25)}>+</button>
         <button type="button" aria-label="Perkecil" onClick={() => zoomBy(0.8)}>−</button>
         <button type="button" aria-label="Pas layar" onClick={() => { setFocus(null); const el = host.current; if (el) camera.current.target = framing(null, el.clientWidth, el.clientHeight) }}>⤢</button>
+      </div>
       </div>
       <div className="iso-badge">
         <span className="live-dot" />

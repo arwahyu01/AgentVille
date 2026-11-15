@@ -186,7 +186,7 @@ const HINTS: Record<CameraMode, string> = {
   explore: 'Explore — click the scene for mouse look · WASD / arrows walk · Shift runs · Esc frees the mouse, press again to exit',
 }
 
-export default function OfficeScene({ agents, tasks, selectedId, onSelect, activity, errands, meetingTopic }: {
+export default function OfficeScene({ agents, tasks, selectedId, onSelect, activity, errands, briefing, meetingTopic }: {
   agents: Agent[]
   tasks?: Task[]
   selectedId: number | null
@@ -194,6 +194,8 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
   activity?: Record<number, StreamEvent>
   /** Newest handoff / review-visit frame per acting agent (2D office replays the trip). */
   errands?: Record<number, StreamEvent>
+  /** Newest plan-briefing frame (the 2D office replays the briefing from it). */
+  briefing?: StreamEvent | null
   meetingTopic?: string
 }) {
   const [mode, setMode] = useState<CameraMode>('office')
@@ -307,12 +309,13 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
             onClearSelection={() => { setStaffTalk(null); onSelect(null) }}
             activity={activity ?? {}}
             errands={errands ?? {}}
+            briefing={briefing ?? null}
             meetingTopic={meetingTopic}
             onStaffTalk={(variant) => { onSelect(null); setStaffTalk(variant) }}
+            leading={rendererSwitch(true)}
             qa={qa}
           />
         </Suspense>
-        {rendererSwitch(true)}
         {dialogs}
       </div>
     )

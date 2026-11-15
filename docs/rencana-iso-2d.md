@@ -324,6 +324,37 @@ lokal (sapaan/mengobrol) lalu kembali istirahat; itu simulasi lokal yang sudah b
 
 ---
 
+## Penyelarasan dengan `main` arwahyu01 (2026-11-15)
+
+Dasar kerja sekarang `main` dari `arwahyu01` (PR #1 sudah di-merge, ditambah kantor otomatis,
+hasil di modal besar, rotasi mesin AI, obrolan agen opsional, layout satu halaman).
+Hasil tinjauan dan perbaikan:
+
+- [x] **Toolbar 2D bertumpuk.** Grup tombol kini memuat 4 tombol (2D, 3D, Explore, layar penuh), dan
+      bilah ruangan yang diposisikan absolut menimpa "Explore" serta ikon layar penuh, bahkan masuk
+      19 px ke penggeser ukuran. Sekarang satu baris flex (`iso-topbar`: grup renderer, chip ruangan
+      yang bisa digulir dengan roda mouse + pemudaran tepi, alat), sehingga tidak bisa saling
+      menimpa. Diperiksa tanpa tumpang tindih di panel 758 px, layar penuh 1440 px, dan ponsel 375 px.
+- [x] **Briefing tim tak terlihat.** Coordinator kini menyetujui rencana seketika, jadi rapat rencana
+      dimulai dan selesai dalam satu transaksi; agen tidak pernah sempat berkumpul dan Coordinator
+      tidak pernah presentasi. Jurnal tetap menyimpan frame `meeting_started` (topik + nama peserta),
+      jadi `frontend/src/features/iso/briefing.ts` memutarnya ulang ±14 detik: peserta duduk di ruang
+      rapat, Coordinator presentasi, layar menampilkan topik (dipotong di batas kata), lalu semuanya
+      kembali ke keadaan backend. Perjalanan serah terima tetap lebih diutamakan. Tes: `briefing.test.ts`.
+- [x] Teks pesan briefing diperbaiki: "(menunggu persetujuan · …)" menjadi "(briefing tim · …)"
+      karena memang sudah tidak menunggu.
+- Diverifikasi di browser dengan satu frame `meeting_started` berformat asli (disisipkan lalu
+      dihapus): Coordinator di titik presentasi, tiga peserta berjalan ke kursi, layar berisi topik,
+      semuanya kembali ke meja setelah 14 detik. Tangkapan: `docs/screenshots/iso2d_briefing_replay.jpg`.
+- [x] Aktivitas lain tetap berfungsi: aksi per alat, serah terima, istirahat, layar penuh.
+
+**Belum dibereskan (butuh persetujuan):** hook Claude Code global masih mengarah ke
+`http://127.0.0.1:8000/api/claude/hooks`, padahal bila port 8000 dipakai proyek lain backend
+AgentVille berjalan di 8001; sesi Claude baru tidak akan muncul sampai hook dialihkan
+(`scripts/claude_hooks.py --remove --apply`, lalu `--url http://127.0.0.1:8001/api/claude/hooks --apply`).
+
+---
+
 ## Fase 6 — Performa dan perapian
 
 - [ ] FPS dan jumlah draw call di 2D saat 14 agen + 4 sesi Claude; target mulus di laptop
