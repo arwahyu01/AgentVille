@@ -305,6 +305,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .danger-button.compact, .secondary-button.compact { padding: 7px 10px; font-size: 10px; }
 
 .page-grid { display: grid; grid-template-columns: 286px minmax(0, 1fr) 330px; gap: 12px; align-items: start; padding: 12px 20px 0; }
+.page-grid > * { min-width: 0; }
 .col-office, .col-rail { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .col-rail { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto; scrollbar-width: thin; padding-bottom: 4px; }
 
@@ -418,7 +419,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .app-footer { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 15px 20px 13px; color: #64748b; font-size: 9.5px; letter-spacing: .6px; }
 
 @media (max-width: 1280px) {
-  .page-grid { grid-template-columns: 250px minmax(0, 1fr); }
+  .page-grid { grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); }
   .col-rail { grid-column: 1 / -1; position: static; max-height: none; overflow: visible; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); align-items: start; }
   .rail-details { grid-column: 1 / -1; }
 }
@@ -434,4 +435,35 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .request-bar { order: 3; flex-basis: 100%; }
   .top-actions { margin-left: auto; }
   .system-status { display: none; }
+}
+
+/* Keep the primary controls and scene overlays inside their own columns. */
+@media (min-width: 901px) and (max-width: 1100px) {
+  .top-bar { gap: 10px; }
+  .request-bar { min-width: 220px; }
+  .top-actions { flex: 1 1 100%; justify-content: flex-end; }
+  .page-grid { grid-template-columns: minmax(200px, 240px) minmax(0, 1fr); }
+  .office-stage .office-canvas { height: min(66vh, 680px); }
+}
+
+@media (max-width: 600px) {
+  .top-bar { align-items: stretch; }
+  .top-bar .brand { flex: 1 1 100%; }
+  .request-bar { flex-basis: 100%; min-width: 0; }
+  .request-bar .primary-button { flex: 0 0 auto; padding-inline: 10px; }
+  .top-actions { margin-left: 0; justify-content: flex-start; }
+  .top-actions .danger-button { flex: 1 1 auto; }
+  .page-grid { gap: 10px; }
+  .office-stage .office-canvas { height: 390px; }
+  .office-stage-head { align-items: flex-start; }
+  .office-stage-head .secondary-button { flex-shrink: 0; }
+  .scene-controls { left: 8px; right: 8px; top: 8px; align-items: flex-start; }
+  .scene-segment { max-width: 100%; flex-wrap: wrap; }
+  .scene-rooms { max-width: 100%; }
+  .scene-hint { left: 8px; right: 8px; bottom: 8px; max-width: none; }
+  .chat-card .panel-heading { flex-wrap: wrap; }
+  .chat-card .panel-heading select { max-width: 100%; width: 100%; }
+  .result-modal-backdrop { padding: 8px; }
+  .result-modal { height: 96vh; }
+  .stage-head { flex-wrap: wrap; }
 }
