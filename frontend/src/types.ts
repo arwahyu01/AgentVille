@@ -44,6 +44,8 @@ export interface ProviderInfo {
   coding_flags?: string
 }
 
+export type AgentChatMode = 'static' | 'milestone' | 'full'
+
 export interface AiConfig {
   ai_enabled: boolean
   ai_model: string
@@ -53,6 +55,7 @@ export interface AiConfig {
   ai_model_claude?: string
   fallback_enabled: boolean
   retry_max: number
+  agent_chat_mode: AgentChatMode
   providers?: Record<ProviderName, ProviderInfo>
 }
 

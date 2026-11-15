@@ -176,6 +176,9 @@ DEFAULT_SETTINGS = {
     "ai_model_claude": "sonnet",
     "ai_fallback_enabled": "0",
     "ai_retry_max": "1",
+    # Agent chatter: "static" keeps templated lines (0 tokens), "milestone" lets the model
+    # speak at handoffs/escalations/QC, "full" rewrites every spoken line.
+    "agent_chat_mode": "static",
     "workspace_root": "",
     "max_plan_steps": "24",
     "max_delegation_depth": "4",

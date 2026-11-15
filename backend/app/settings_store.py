@@ -42,6 +42,11 @@ def ai_model_for(db: Session, provider: str) -> str:
 def ai_fallback_enabled(db: Session) -> bool:
     return get_setting(db, "ai_fallback_enabled") == "1"
 
+def agent_chat_mode(db: Session) -> str:
+    """static (0 tokens) | milestone (model speaks at key moments) | full (every line)."""
+    value = get_setting(db, "agent_chat_mode")
+    return value if value in ("static", "milestone", "full") else "static"
+
 def ai_retry_max(db: Session) -> int:
     try:
         return max(0, min(3, int(get_setting(db, "ai_retry_max"))))

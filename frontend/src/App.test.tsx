@@ -46,6 +46,7 @@ const conversations: Conversation[] = [
 const aiConfig = {
   ai_enabled: false, ai_model: 'opencode/big-pickle', ai_timeout_s: 300,
   provider: 'opencode', ai_model_qoder: 'Efficient', fallback_enabled: false, retry_max: 1,
+  agent_chat_mode: 'static',
   providers: { opencode: { available: true, reason: null, coding: false }, qoder: { available: true, reason: null, coding: true } },
 }
 
@@ -285,6 +286,17 @@ describe('one-page office', () => {
     const panel = await screen.findByTestId('approvals')
     expect(within(panel).getByText('Broken build')).toBeInTheDocument()
     expect(within(panel).getByText(/pimpinan minta arahan/)).toBeInTheDocument()
+  })
+
+  it('switches agent chatter between static and real', async () => {
+    render(<App />)
+    await waitFor(() => screen.getByText('AI Engine'))
+    fireEvent.change(screen.getByLabelText('Agent chat mode'), { target: { value: 'milestone' } })
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find((c) =>
+        String(c[0]).endsWith('/api/ai/config') && (c[1] as RequestInit | undefined)?.method === 'PATCH')
+      expect((call![1] as RequestInit).body).toContain('"agent_chat_mode":"milestone"')
+    })
   })
 
   it('renders the AI engine bar in the collapsible settings and patches config', async () => {

@@ -105,6 +105,7 @@ class AIConfigRead(BaseModel):
     ai_model_claude: str = "sonnet"
     fallback_enabled: bool = False
     retry_max: int = 1
+    agent_chat_mode: Literal["static", "milestone", "full"] = "static"
     providers: dict = {}
 
 class AIConfigPatch(BaseModel):
@@ -116,6 +117,7 @@ class AIConfigPatch(BaseModel):
     ai_timeout_s: int | None = Field(default=None, ge=10, le=1800)
     fallback_enabled: bool | None = None
     retry_max: int | None = Field(default=None, ge=0, le=3)
+    agent_chat_mode: Literal["static", "milestone", "full"] | None = None
 
 class TaskEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)

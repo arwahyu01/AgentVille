@@ -4,6 +4,7 @@ from pathlib import Path
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app import chatter
 from app.agent_status import sync_agent_status
 from app.models import Agent, Task, TaskEvent
 
@@ -145,13 +146,16 @@ def say(db: Session, task_id: int, speaker: Agent | None, message: str, *,
         recipient: Agent | None = None, conversation_id: int | None = None,
         event_type: str = "agent_chat", step_index: int | None = None) -> TaskEvent:
     """One spoken line from an agent, stored as journal data so the team feed and the
-    office can replay the conversation exactly as it happened."""
-    return add_event(db, task_id, event_type, message,
-                     conversation_id=conversation_id,
-                     agent_id=speaker.id if speaker else None,
-                     step_index=step_index,
-                     actor_agent_id=speaker.id if speaker else None,
-                     recipient_agent_id=recipient.id if recipient else None)
+    office can replay the conversation exactly as it happened. When real chatter is on,
+    the honest template is stored now and a background model call may rewrite it."""
+    event = add_event(db, task_id, event_type, message,
+                      conversation_id=conversation_id,
+                      agent_id=speaker.id if speaker else None,
+                      step_index=step_index,
+                      actor_agent_id=speaker.id if speaker else None,
+                      recipient_agent_id=recipient.id if recipient else None)
+    chatter.maybe_schedule(db, event)
+    return event
 
 
 def save_result(db: Session, task: Task, text: str) -> Task:

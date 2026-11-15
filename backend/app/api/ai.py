@@ -22,6 +22,7 @@ def _read_config(db: Session) -> AIConfigRead:
         ai_model_claude=settings_store.get_setting(db, "ai_model_claude"),
         fallback_enabled=settings_store.ai_fallback_enabled(db),
         retry_max=settings_store.ai_retry_max(db),
+        agent_chat_mode=settings_store.agent_chat_mode(db),
         providers=registry.availability(),
     )
 
@@ -55,6 +56,8 @@ def patch_config(payload: AIConfigPatch, db: Session = Depends(get_db)):
         settings_store.set_setting(db, "ai_fallback_enabled", "1" if payload.fallback_enabled else "0")
     if payload.retry_max is not None:
         settings_store.set_setting(db, "ai_retry_max", str(payload.retry_max))
+    if payload.agent_chat_mode is not None:
+        settings_store.set_setting(db, "agent_chat_mode", payload.agent_chat_mode)
     db.commit()
     return _read_config(db)
 

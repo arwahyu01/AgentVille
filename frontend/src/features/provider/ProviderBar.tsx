@@ -85,6 +85,16 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
           Fallback
         </label>
         <div className="ai-model-field">
+          <span>Percakapan agen</span>
+          <select aria-label="Agent chat mode" disabled={busy} value={config.agent_chat_mode ?? 'static'}
+                  title="Statis = gratis. Milestone = AI hanya saat handoff/eskalasi/QC. Semua = setiap pesan."
+                  onChange={(e) => void patch({ agent_chat_mode: e.target.value as AiConfig['agent_chat_mode'] })}>
+            <option value="static">Statis · 0 token</option>
+            <option value="milestone">Real saat momen penting</option>
+            <option value="full">Real untuk semua pesan</option>
+          </select>
+        </div>
+        <div className="ai-model-field">
           <span>Timeout s</span>
           <input aria-label="AI timeout" type="number" min={10} max={1800} disabled={busy} value={config.ai_timeout_s}
                  onChange={(e) => void patch({ ai_timeout_s: Number(e.target.value) })} />

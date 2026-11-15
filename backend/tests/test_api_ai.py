@@ -32,6 +32,13 @@ def test_config_patch_rejects_bad_timeout(client):
     assert client.patch("/api/ai/config", json={"ai_timeout_s": 99999}).status_code == 422
 
 
+def test_agent_chat_mode_defaults_static_and_roundtrips(client):
+    assert client.get("/api/ai/config").json()["agent_chat_mode"] == "static"
+    assert client.patch("/api/ai/config", json={"agent_chat_mode": "milestone"}).json()["agent_chat_mode"] == "milestone"
+    assert client.get("/api/ai/config").json()["agent_chat_mode"] == "milestone"
+    assert client.patch("/api/ai/config", json={"agent_chat_mode": "loud"}).status_code == 422
+
+
 def test_models_endpoint(client, monkeypatch):
     import app.ai.registry as registry
     registry._cache.clear()
