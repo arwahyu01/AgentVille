@@ -106,6 +106,8 @@ class AIConfigRead(BaseModel):
     fallback_enabled: bool = False
     retry_max: int = 1
     agent_chat_mode: Literal["static", "milestone", "full"] = "static"
+    rotate_models_enabled: bool = True
+    rotate_models_max: int = 4
     providers: dict = {}
 
 class AIConfigPatch(BaseModel):
@@ -118,6 +120,8 @@ class AIConfigPatch(BaseModel):
     fallback_enabled: bool | None = None
     retry_max: int | None = Field(default=None, ge=0, le=3)
     agent_chat_mode: Literal["static", "milestone", "full"] | None = None
+    rotate_models_enabled: bool | None = None
+    rotate_models_max: int | None = Field(default=None, ge=1, le=20)
 
 class TaskEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)

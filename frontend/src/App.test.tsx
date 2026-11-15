@@ -46,7 +46,7 @@ const conversations: Conversation[] = [
 const aiConfig = {
   ai_enabled: false, ai_model: 'opencode/big-pickle', ai_timeout_s: 300,
   provider: 'opencode', ai_model_qoder: 'Efficient', fallback_enabled: false, retry_max: 1,
-  agent_chat_mode: 'static',
+  agent_chat_mode: 'static', rotate_models_enabled: true, rotate_models_max: 4,
   providers: { opencode: { available: true, reason: null, coding: false }, qoder: { available: true, reason: null, coding: true } },
 }
 
@@ -296,6 +296,17 @@ describe('one-page office', () => {
       const call = vi.mocked(fetch).mock.calls.find((c) =>
         String(c[0]).endsWith('/api/ai/config') && (c[1] as RequestInit | undefined)?.method === 'PATCH')
       expect((call![1] as RequestInit).body).toContain('"agent_chat_mode":"milestone"')
+    })
+  })
+
+  it('configures automatic engine rotation for exhausted providers', async () => {
+    render(<App />)
+    await waitFor(() => screen.getByText('AI Engine'))
+    fireEvent.change(screen.getByLabelText('Rotate max'), { target: { value: '6' } })
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find((c) =>
+        String(c[0]).endsWith('/api/ai/config') && (c[1] as RequestInit | undefined)?.method === 'PATCH')
+      expect((call![1] as RequestInit).body).toContain('"rotate_models_max":6')
     })
   })
 

@@ -47,6 +47,14 @@ def agent_chat_mode(db: Session) -> str:
     value = get_setting(db, "agent_chat_mode")
     return value if value in ("static", "milestone", "full") else "static"
 
+def rotate_models_enabled(db: Session) -> bool:
+    """When an engine is exhausted, keep the job going on the next provider/model."""
+    return get_setting(db, "rotate_models_enabled") != "0"
+
+def rotate_models_max(db: Session) -> int:
+    """How many other engines a single step may try before giving up."""
+    return _int_setting(db, "rotate_models_max", 4, 1, 20)
+
 def ai_retry_max(db: Session) -> int:
     try:
         return max(0, min(3, int(get_setting(db, "ai_retry_max"))))

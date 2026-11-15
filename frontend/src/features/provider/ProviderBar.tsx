@@ -84,6 +84,17 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
                  onChange={(e) => void patch({ fallback_enabled: e.target.checked })} />
           Fallback
         </label>
+        <label className="ai-toggle" title="Kalau AI kehabisan kuota, pekerjaan dilanjutkan ke model/penyedia lain (yang free didahulukan).">
+          <input type="checkbox" aria-label="Auto-rotate engines" checked={config.rotate_models_enabled ?? true}
+                 disabled={busy} onChange={(e) => void patch({ rotate_models_enabled: e.target.checked })} />
+          Auto-rotate AI
+        </label>
+        <div className="ai-model-field">
+          <span>Rotate max</span>
+          <input aria-label="Rotate max" type="number" min={1} max={20} disabled={busy || !(config.rotate_models_enabled ?? true)}
+                 value={config.rotate_models_max ?? 4}
+                 onChange={(e) => void patch({ rotate_models_max: Number(e.target.value) })} />
+        </div>
         <div className="ai-model-field">
           <span>Percakapan agen</span>
           <select aria-label="Agent chat mode" disabled={busy} value={config.agent_chat_mode ?? 'static'}

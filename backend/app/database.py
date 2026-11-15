@@ -191,6 +191,10 @@ DEFAULT_SETTINGS = {
     "office_ops_enabled": "1",
     "office_patrol_tick_s": "60",
     "office_cleaning_tick_s": "90",
+    # When an engine hits its quota/limit, hand the same work to the next provider/model
+    # (free models first) instead of failing the job.
+    "rotate_models_enabled": "1",
+    "rotate_models_max": "4",
 }
 
 def seed_settings():

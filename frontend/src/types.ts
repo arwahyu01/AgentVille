@@ -56,6 +56,8 @@ export interface AiConfig {
   fallback_enabled: boolean
   retry_max: number
   agent_chat_mode: AgentChatMode
+  rotate_models_enabled: boolean
+  rotate_models_max: number
   providers?: Record<ProviderName, ProviderInfo>
 }
 

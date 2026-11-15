@@ -39,6 +39,20 @@ def test_agent_chat_mode_defaults_static_and_roundtrips(client):
     assert client.patch("/api/ai/config", json={"agent_chat_mode": "loud"}).status_code == 422
 
 
+def test_rotate_models_defaults_on_and_roundtrips(client):
+    config = client.get("/api/ai/config").json()
+    assert config["rotate_models_enabled"] is True
+    assert config["rotate_models_max"] == 4
+    assert client.patch("/api/ai/config", json={"rotate_models_enabled": False}).json()["rotate_models_enabled"] is False
+    assert client.patch("/api/ai/config", json={"rotate_models_max": 9}).json()["rotate_models_max"] == 9
+    assert client.get("/api/ai/config").json()["rotate_models_max"] == 9
+    assert client.patch("/api/ai/config", json={"rotate_models_max": 0}).status_code == 422
+    assert client.get("/api/ai/config").json()["agent_chat_mode"] == "static"
+    assert client.patch("/api/ai/config", json={"agent_chat_mode": "milestone"}).json()["agent_chat_mode"] == "milestone"
+    assert client.get("/api/ai/config").json()["agent_chat_mode"] == "milestone"
+    assert client.patch("/api/ai/config", json={"agent_chat_mode": "loud"}).status_code == 422
+
+
 def test_models_endpoint(client, monkeypatch):
     import app.ai.registry as registry
     registry._cache.clear()

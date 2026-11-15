@@ -11,6 +11,7 @@ from app import task_service
 from app.agent_actions import ActionGate, redact
 from app.ai import registry
 from app.ai import fallback as ai_fallback
+from app.ai import rotation as ai_rotation
 from app.ai.base import AIProvider, Persona, ProviderResult
 from app.ai.personas import COORDINATOR, MANAGER, QC_REVIEWER, REVIEWER, persona_for_role
 from app.database import SessionLocal
@@ -21,7 +22,8 @@ from app.qc_schema import criterion_ids, validate_qc_payload
 from app.settings_store import (ai_enabled, ai_fallback_enabled, ai_model, ai_model_for,
                                 ai_provider, ai_retry_max, ai_timeout_s, get_setting,
                                 lease_seconds, max_concurrency, max_parallel_jobs, merge_policy,
-                                plan_max_depth, plan_max_steps)
+                                plan_max_depth, plan_max_steps, rotate_models_enabled,
+                                rotate_models_max)
 from app.task_service import (add_event, save_result, transition, say,
                               force_transition, claim_task, heartbeat, release_lease,
                               seat_agent, TransitionError)
@@ -74,7 +76,62 @@ class Orchestrator(threading.Thread):
         if self._injected_provider is not None:
             return self._injected_provider
         with SessionLocal() as db:
-            return registry.make_provider(ai_provider(db))
+            name = ai_provider(db)
+            model = ai_model_for(db, name)
+            rotate = rotate_models_enabled(db)
+        provider = registry.make_provider(name)
+        if not rotate:
+            return provider
+        return self._rotating(provider, name, model)
+
+    # -- engine rotation (quota / limit / gateway failures) -------------------
+
+    def _coding_engines(self) -> set[str]:
+        """Installed providers whose CLI can take a coding step."""
+        avail = registry.availability()
+        return {name for name in registry.PROVIDERS
+                if avail.get(name, {}).get("available") and avail.get(name, {}).get("coding")}
+
+    def _rotation_candidates(self, current_name: str, current_model: str) -> list[tuple[str, str]]:
+        """Engines to try after the current one is exhausted. Free models first, and never
+        the pair that just failed. Providers with no model list still join with the model
+        configured for them, so an installed CLI is never left out of the chain."""
+        with SessionLocal() as db:
+            limit = rotate_models_max(db)
+            configured = {name: ai_model_for(db, name) for name in registry.PROVIDERS}
+        avail = registry.availability()
+        names = [name for name in registry.PROVIDERS if avail.get(name, {}).get("available")]
+        models: dict[str, list[str]] = {}
+        for name in names:
+            try:
+                listed = registry.list_models(name)
+            except Exception:
+                logger.exception("could not list %s models for rotation", name)
+                listed = []
+            if not listed:
+                listed = [configured[name]] if configured.get(name) else []
+            models[name] = listed
+        return ai_rotation.candidate_chain(current_name, current_model, names, models, limit=limit)
+
+    def _rotating(self, provider: AIProvider, name: str, model: str) -> AIProvider:
+        return ai_rotation.RotatingProvider(provider, name, model,
+                                            self._rotation_candidates(name, model),
+                                            self._coding_engines())
+
+    def _log_switches(self, provider: object, task_id: int, **fields) -> None:
+        """Journal every engine swap the run made, so the feed tells the truth about who
+        actually finished the work."""
+        notes = getattr(provider, "switched", None)
+        if not notes:
+            return
+        seen: set[str] = set()
+        with self._db_lock, SessionLocal() as db:
+            for note in notes:
+                if note in seen:
+                    continue
+                seen.add(note)
+                add_event(db, task_id, "provider_switched", note, **fields)
+            db.commit()
 
     def run(self) -> None:
         self.recover_interrupted()
@@ -233,6 +290,7 @@ class Orchestrator(threading.Thread):
                   "Respond to the latest user message with an ask or a proposal.")[:6000]
         result = provider.run(persona, prompt, timeout_s=timeout_s,
                               should_cancel=lambda: self._cancelled(anchor_id))
+        self._log_switches(provider, anchor_id, conversation_id=conversation_id)
         if self._cancelled(anchor_id):
             return
         payload = extract_json(result.text) if result.ok else None
@@ -308,6 +366,7 @@ class Orchestrator(threading.Thread):
                                     task.agent.name if task.agent else None, model)
             prompt = prompt_override or f"{task.title}\n{task.description}".strip()
             result = self._call(provider, persona, prompt, timeout_s, parent_id)
+            self._log_switches(provider, task.id)
             if self._cancelled(parent_id):
                 return
             if result.ok:
@@ -402,6 +461,7 @@ class Orchestrator(threading.Thread):
         if extra_prompt:
             prompt = f"{prompt}\n\n{extra_prompt}"
         result = self._call(provider, persona, prompt[:6000], timeout_s, parent_id)
+        self._log_switches(provider, child_id)
         if self._cancelled(parent_id):
             return None
         return result
@@ -520,6 +580,7 @@ class Orchestrator(threading.Thread):
                     "claude": ai_model_for(db, "claude"),
                 },
                 "fallback": ai_fallback_enabled(db),
+                "rotate": rotate_models_enabled(db),
                 "retry_max": ai_retry_max(db),
                 "workspace_root": get_setting(db, "workspace_root"),
             }
@@ -544,7 +605,10 @@ class Orchestrator(threading.Thread):
                 other = next((n for n in registry.PROVIDERS
                               if n != name and avail.get(n, {}).get("available")), None)
                 alternate = registry.make_provider(other) if other else None
-            return (registry.make_provider(name), name, model, alternate, "")
+            primary = registry.make_provider(name)
+            if cfg["rotate"]:
+                primary = self._rotating(primary, name, model)
+            return (primary, name, model, alternate, "")
         name = cfg["provider"]
         alternate = None
         if cfg["fallback"]:
@@ -554,7 +618,10 @@ class Orchestrator(threading.Thread):
             other = next((n for n in registry.PROVIDERS if n != name and avail.get(n, {}).get("available")),
                          "qoder" if name == "opencode" else "opencode")
             alternate = registry.make_provider(other)
-        return (registry.make_provider(name), name, cfg["text_model"], alternate, "")
+        primary = registry.make_provider(name)
+        if cfg["rotate"]:
+            primary = self._rotating(primary, name, cfg["text_model"])
+        return (primary, name, cfg["text_model"], alternate, "")
 
     def _run_specialist(self, primary: AIProvider, alternate: AIProvider | None, persona: Persona,
                         prompt: str, timeout_s: int, anchor_id: int,
@@ -986,6 +1053,8 @@ class Orchestrator(threading.Thread):
                                       anchor_id, diff_probe)
         if not result.provider:
             result = dataclasses.replace(result, provider=provider_name, model=model)
+        self._log_switches(provider, child_id, conversation_id=conversation_id,
+                            agent_id=step_agent_id, step_index=index)
         with self._db_lock, SessionLocal() as db:
             # Provenance belongs on the step itself, not only on the journal: the result modal
             # and any later audit read the Task row.
@@ -1123,6 +1192,7 @@ class Orchestrator(threading.Thread):
             )
             review_prompt = head + evidence.text
             result = self._call(provider, qc_persona, review_prompt, timeout_s, anchor_id)
+            self._log_switches(provider, anchor_id)
             if self._cancelled(anchor_id):
                 return
             provider_used = result.provider or provider_name
@@ -1284,6 +1354,7 @@ class Orchestrator(threading.Thread):
         persona = dataclasses.replace(MANAGER, model=model)
         result = self._call(provider, persona,
                             f"Create a work plan for this request:\n{instruction}", timeout_s, parent_id)
+        self._log_switches(provider, parent_id)
         if not result.ok:
             with SessionLocal() as db:
                 parent = db.get(Task, parent_id)
