@@ -36,15 +36,15 @@ logger = logging.getLogger("agentville.telegram")
 
 MAX_INBOUND_CHARS = 4000
 MAX_OUTBOUND_CHARS = 4096
-MILESTONE_STATUSES = {"awaiting_approval", "completed", "failed", "cancelled"}
+MILESTONE_STATUSES = {"approved", "completed", "failed", "cancelled"}
 BACKEND_ENV = Path(__file__).resolve().parents[2] / ".env"
 
 HELP_TEXT = (
     "AgentVille commands:\n"
     "/status — current request state and plan\n"
-    "/approve <version> — approve a proposed plan (approval always names the version)\n"
-    "/revise <notes> — send the plan back for a redraft\n"
+    "/revise <notes> — stop the running work and have the Coordinator redraft\n"
     "/cancel — cancel the active request\n"
+    "/approve <version> — legacy: sign an old proposal that is still pending\n"
     "Any other message goes to the Coordinator while it is asking questions."
 )
 
@@ -206,6 +206,7 @@ class TelegramPoller(threading.Thread):
             return
         version = conv.current_plan_version
         if anchor.status == "awaiting_approval":
+            # Legacy state only: with automatic approval the anchor moves straight to 'approved'.
             outbox.enqueue(db, conv.id,
                            f"I saved your note, but plan v{version} is awaiting your decision. "
                            f"Reply /approve {version} to run exactly that version, "
@@ -215,6 +216,7 @@ class TelegramPoller(threading.Thread):
         elif anchor.status in ("approved", "queued", "running", "reviewing"):
             outbox.enqueue(db, conv.id,
                            f"Work is underway ({anchor.status}) — /status for progress. "
+                           "I saved your note; send /revise <notes> to redraft the plan, "
                            "/cancel stops it.",
                            f"running-hint-{msg.id}")
 
@@ -295,8 +297,8 @@ class TelegramPoller(threading.Thread):
             for index, step in enumerate(steps):
                 tools = " · writes files" if step.get("uses_tools") else ""
                 lines.append(f"  {index}. [{step.get('agent_role', '?')}] {step.get('title', '')}{tools}")
-            if anchor is not None and anchor.status == "awaiting_approval":
-                lines.append(f"Approve with: /approve {conv.current_plan_version}")
+            if anchor is not None and anchor.status in ("approved", "queued", "running", "reviewing"):
+                lines.append("Work starts automatically. /revise <notes> redrafts it, /cancel stops it.")
         return "\n".join(lines)
 
     # -- outbound queue -----------------------------------------------------------
@@ -355,9 +357,9 @@ class TelegramPoller(threading.Thread):
     def _milestone_text(db, conv: Conversation, anchor: Task) -> str:
         title = conv.title[:80]
         version = conv.current_plan_version
-        if anchor.status == "awaiting_approval":
-            return (f"A plan proposal is ready: “{title}”\n"
-                    f"Review it with /status, then run /approve {version} or /revise <notes>.")
+        if anchor.status == "approved":
+            return (f"The plan is signed off and the crew has started: “{title}” (v{version}).\n"
+                    "Send /revise <notes> to redraft it or /cancel to stop.")
         if anchor.status == "completed":
             excerpt = (anchor.result or "")[:600]
             return (f"Work completed and passed QC: “{title}”\n{excerpt}"

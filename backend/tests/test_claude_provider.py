@@ -112,7 +112,9 @@ def test_finds_the_newest_claude_desktop_binary(monkeypatch, tmp_path):
     monkeypatch.setattr(claude_mod.Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(claude_mod.shutil, "which", lambda name: None)
     monkeypatch.delenv(claude_mod.BIN_ENV, raising=False)
-    assert "/2.1.325/" in claude_mod.find_binary()
+    found = claude_mod.find_binary()
+    # Version comparison is the point of this test; separators differ on Windows.
+    assert "2.1.325" in found.replace("\\", "/").split("/")
 
 
 def test_override_and_path_win_over_the_desktop_copy(monkeypatch, tmp_path):

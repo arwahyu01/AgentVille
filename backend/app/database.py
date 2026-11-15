@@ -180,6 +180,7 @@ DEFAULT_SETTINGS = {
     "max_plan_steps": "24",
     "max_delegation_depth": "4",
     "max_concurrency": "3",
+    "max_parallel_jobs": "4",
     "worker_lease_s": "120",
     "merge_policy": "worktree",
     # Office simulation cadence (seconds per schedule slot). The daemon is deterministic:

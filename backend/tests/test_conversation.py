@@ -58,8 +58,11 @@ def test_propose_approve_idempotent_flow(client, session_factory):
         cs.propose_plan(db, conv_id, make_plan(), summary="dua langkah")
         conv = cs.get_conversation(db, conv_id)
         anchor = db.get(Task, conv.anchor_task_id)
-        assert anchor.status == "awaiting_approval"
+        # The office leader signs the plan off: no manual gate, the crew starts at once.
+        assert anchor.status == "approved"
         assert conv.current_plan_version == 1
+        children = db.query(Task).filter(Task.parent_id == anchor.id).order_by(Task.id).all()
+        assert [c.title for c in children] == ["Research menu", "Build landing"]
     plan = client.get(f"/api/conversations/{conv_id}/plan").json()
     assert plan["current"]["version"] == 1
     assert len(plan["current"]["steps"]) == 2
@@ -84,22 +87,27 @@ def test_new_version_supersedes_old_approval(client, session_factory):
         conv = cs.get_conversation(db, conv_id)
         assert conv.current_plan_version == 2
         history = cs.plan_history(db, conv_id)
-        assert {row.status for row in history} == {"proposed", "superseded"} or history[0].status == "proposed"
+        assert {row.status for row in history} == {"approved", "superseded"} or history[0].status == "approved"
     stale = client.post(f"/api/conversations/{conv_id}/approve", json={"plan_version": 1})
     assert stale.status_code == 409
     fresh = client.post(f"/api/conversations/{conv_id}/approve", json={"plan_version": 2})
     assert fresh.status_code == 200
 
 
-def test_revise_only_from_awaiting(client, session_factory):
+def test_revise_only_from_an_active_plan(client, session_factory):
     conv_id = client.post("/api/conversations", json={"first_message": "Buatkan web"}).json()["id"]
     early = client.post(f"/api/conversations/{conv_id}/revise", json={"notes": "x"})
     assert early.status_code == 409
     with session_factory() as db:
         cs.propose_plan(db, conv_id, make_plan())
+    # A revision also stops whatever the running plan already spawned.
     ok = client.post(f"/api/conversations/{conv_id}/revise", json={"notes": "ubah scope"})
     assert ok.status_code == 200
     assert ok.json()["status"] == "clarifying"
+    with session_factory() as db:
+        anchor = cs.get_conversation(db, conv_id)
+        children = db.query(Task).filter(Task.parent_id == anchor.anchor_task_id).all()
+        assert all(c.status == "cancelled" for c in children)
 
 
 def test_cancel_conversation(client):

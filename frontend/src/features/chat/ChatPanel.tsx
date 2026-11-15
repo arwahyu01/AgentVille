@@ -5,15 +5,15 @@ import { api } from '../../lib/api'
 import type { ChatMessage, Conversation } from '../../types'
 
 const STATUS_HINTS: Record<string, string> = {
-  clarifying: 'The Coordinator will reply shortly…',
-  awaiting_approval: 'Review the proposal in the plan panel — chat is paused until you approve or request a revision.',
-  approved: 'Plan approved — execution is queued.',
-  queued: 'Execution queued.',
-  running: 'Specialists are working.',
-  reviewing: 'QC review in progress.',
-  completed: 'Done. Start a new request for more work.',
-  failed: 'The run failed. Start a new request or retry from the task board.',
-  cancelled: 'Cancelled.',
+  clarifying: 'Pimpinan akan membalas sebentar lagi…',
+  awaiting_approval: 'Rencana lama menunggu keputusanmu — setujui di panel Butuh Persetujuan.',
+  approved: 'Rencana disetujui — pekerjaan masuk antrean.',
+  queued: 'Menunggu giliran dieksekusi.',
+  running: 'Para spesialis sedang bekerja.',
+  reviewing: 'QC sedang memeriksa hasil.',
+  completed: 'Selesai. Kirim permintaan baru untuk pekerjaan lain.',
+  failed: 'Pekerjaan berhenti — lihat panel Butuh Persetujuan.',
+  cancelled: 'Dibatalkan.',
 }
 
 export default function ChatPanel({ conversation, refreshKey, onSent, onError }: {
@@ -73,7 +73,7 @@ export default function ChatPanel({ conversation, refreshKey, onSent, onError }:
       <div className="chat-log">
         {messages.map((message) => (
           <div key={message.id} className={`chat-bubble ${message.role}`}>
-            <span className="chat-who">{message.role === 'user' ? 'You' : message.role === 'assistant' ? 'Atlas' : 'System'}</span>
+            <span className="chat-who">{message.role === 'user' ? 'Kamu' : message.role === 'assistant' ? 'Atlas' : 'Sistem'}</span>
             <p>{message.content}</p>
           </div>
         ))}
@@ -82,9 +82,9 @@ export default function ChatPanel({ conversation, refreshKey, onSent, onError }:
       <form className="chat-input" onSubmit={send}>
         <input aria-label="Message" value={draft} disabled={!canSend || busy}
                onChange={(e) => setDraft(e.target.value)}
-               placeholder={canSend ? 'Answer the Coordinator…' : 'Chat is paused in this state'} />
+               placeholder={canSend ? 'Jawab pertanyaan pimpinan…' : 'Chat hanya aktif saat klarifikasi'} />
         <button className="primary-button compact" type="submit" disabled={!canSend || busy || !draft.trim()}>
-          <Send size={14} /> Send
+          <Send size={14} /> Kirim
         </button>
       </form>
     </div>

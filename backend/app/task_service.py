@@ -11,14 +11,21 @@ ALLOWED_TRANSITIONS = {
     "pending": {"queued", "cancelled", "clarifying"},
     "clarifying": {"awaiting_approval", "cancelled"},
     "awaiting_approval": {"clarifying", "approved", "cancelled"},
-    "approved": {"queued", "cancelled"},
-    "queued": {"running", "cancelled"},
-    "running": {"completed", "reviewing", "failed", "cancelled"},
+    # A plan runs automatically, so the user can still pull an approved/queued request back
+    # into clarifying (revise) instead of being stuck once the gate is gone.
+    "approved": {"queued", "cancelled", "clarifying"},
+    "queued": {"running", "cancelled", "clarifying"},
+    "running": {"completed", "reviewing", "failed", "cancelled", "clarifying"},
     "reviewing": {"completed", "failed", "running"},
     "completed": set(),
-    "failed": {"queued"},
+    "failed": {"queued", "cancelled"},
     "cancelled": set(),
 }
+
+# Everything a user can stop from the single-page console. History is never deleted:
+# "clear all tasks" only cancels what is still in flight.
+ACTIVE_STATUSES = ("pending", "clarifying", "awaiting_approval", "approved", "queued",
+                   "running", "reviewing")
 
 # States that belong to the conversation workflow; only anchors (run_mode='conversation')
 # may enter them — manual/AI tasks keep the Fase-2 subset.
@@ -101,6 +108,50 @@ def force_transition(db: Session, task: Task, new_status: str, message: str,
     db.commit()
     db.refresh(task)
     return task
+
+
+def cancel_tree(db: Session, task: Task, message: str = "Cancelled by user") -> Task:
+    """Cancel one task and everything it spawned. Step tasks are scheduled by the
+    orchestrator, so leaving them behind would keep the office working on a dead request."""
+    if task.status not in ACTIVE_STATUSES:
+        return task
+    for child in db.query(Task).filter(Task.parent_id == task.id).all():
+        if child.status in ("pending", "queued", "running", "reviewing"):
+            force_transition(db, child, "cancelled", "Cancelled with its parent request")
+    return transition(db, task, "cancelled", message, "cancelled")
+
+
+def clear_active_tasks(db: Session) -> dict:
+    """Stop every in-flight request but keep the journal and result history intact."""
+    anchors = (db.query(Task)
+               .filter(Task.parent_id.is_(None), Task.status.in_(ACTIVE_STATUSES))
+               .order_by(Task.id).all())
+    stopped: list[int] = []
+    for task in anchors:
+        try:
+            cancel_tree(db, task, "Stopped from the console (clear tasks)")
+            stopped.append(task.id)
+        except TransitionError:
+            continue
+    return {"stopped": stopped, "count": len(stopped)}
+
+
+def active_agent(db: Session, role: str) -> Agent | None:
+    """First agent holding the role — the roster maps one seat per role."""
+    return db.query(Agent).filter(Agent.role == role).order_by(Agent.id).first()
+
+
+def say(db: Session, task_id: int, speaker: Agent | None, message: str, *,
+        recipient: Agent | None = None, conversation_id: int | None = None,
+        event_type: str = "agent_chat", step_index: int | None = None) -> TaskEvent:
+    """One spoken line from an agent, stored as journal data so the team feed and the
+    office can replay the conversation exactly as it happened."""
+    return add_event(db, task_id, event_type, message,
+                     conversation_id=conversation_id,
+                     agent_id=speaker.id if speaker else None,
+                     step_index=step_index,
+                     actor_agent_id=speaker.id if speaker else None,
+                     recipient_agent_id=recipient.id if recipient else None)
 
 
 def save_result(db: Session, task: Task, text: str) -> Task:

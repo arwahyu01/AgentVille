@@ -131,13 +131,14 @@ def test_new_message_after_finished_request_starts_new_conversation(session_fact
 # -- coordinator replies reach the chat ---------------------------------------------
 
 
-def test_awaiting_approval_text_is_not_silently_ignored(session_factory):
+def test_note_while_work_runs_is_answered_with_the_revision_lever(session_factory):
     poller, sent = make_poller(session_factory, [])
     poller.handle_update(update(1, 111, "make the thing"))
     propose(session_factory)
     poller.handle_update(update(2, 111, "actually make it blue"))
     deliver(poller, sent)
-    assert len(sent) == 1 and "/approve 1" in sent[0]["text"] and "saved" in sent[0]["text"].lower()
+    # The plan already runs, so the note cannot gate it: the reply names /revise instead.
+    assert len(sent) == 1 and "/revise" in sent[0]["text"] and "saved" in sent[0]["text"].lower()
     with session_factory() as db:
         msgs = db.query(Message).all()
         assert any("blue" in m.content for m in msgs)  # note is kept in the transcript
@@ -180,7 +181,8 @@ def test_revise_and_cancel_and_status_commands(session_factory):
     propose(session_factory)
     poller.handle_command("111", "/status", update_id=2)
     deliver(poller, sent)
-    assert "Status: awaiting_approval" in sent[-1]["text"] and "0. [AI Coordinator]" in sent[-1]["text"]
+    assert "Status: approved" in sent[-1]["text"] and "0. [AI Coordinator]" in sent[-1]["text"]
+    assert "Work starts automatically" in sent[-1]["text"]
     poller.handle_command("111", "/revise use a smaller scope", update_id=3)
     deliver(poller, sent)
     assert "redraft" in sent[-1]["text"]
@@ -279,11 +281,11 @@ def test_milestones_notify_once_per_change(session_factory):
     with session_factory() as db:
         conv = db.query(Conversation).one()
         anchor = db.get(Task, conv.anchor_task_id)
-        anchor.status = "awaiting_approval"
+        anchor.status = "approved"
         db.commit()
     poller.check_milestones()
     deliver(poller, sent)
-    assert len(sent) == 1 and "/approve" in sent[0]["text"] and sent[0]["chat_id"] == "111"
+    assert len(sent) == 1 and "crew has started" in sent[0]["text"] and sent[0]["chat_id"] == "111"
     poller.check_milestones()          # unchanged status — no repeat
     deliver(poller, sent)
     assert len(sent) == 1

@@ -35,29 +35,35 @@ export default function TeamConversation({ events, connected }: { events: TeamEv
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [newest])
+  const escalation = ordered.filter((row) => row.event_type === 'needs_help').length
   return (
     <div className="panel team-panel" data-testid="team-conversation">
       <div className="panel-heading">
         <div>
-          <h2>Team Conversation</h2>
-          <p>Coordinator and specialist updates · {connected ? 'live' : 'from the journal'}</p>
+          <h2>Percakapan Tim</h2>
+          <p>Pimpinan memberi instruksi · spesialis melapor · eskalasi kesulitan · {connected ? 'live' : 'dari jurnal'}</p>
         </div>
-        <Users size={17} className={connected ? 'live' : undefined} />
+        <span className="team-badges">
+          {escalation > 0 && <span className="team-alert" title="Laporan kesulitan ke pimpinan">{escalation} eskalasi</span>}
+          <Users size={17} className={connected ? 'live' : undefined} />
+        </span>
       </div>
       {ordered.length === 0 && (
-        <p className="team-empty">No team messages yet — the Coordinator and specialists appear here as they work.</p>
+        <p className="team-empty">Belum ada percakapan — kirim permintaan dan instruksi pimpinan akan muncul di sini.</p>
       )}
       <ul className="team-feed" ref={listRef}>
         {ordered.map((event) => (
-          <li key={event.id}>
+          <li key={event.id} className={event.event_type === 'needs_help' ? 'needs-help' : undefined}>
             <time>{clockTime(event.created_at)}</time>
             <div className="team-body">
               <div className="team-who">
                 <strong>{event.agent_name ?? 'System'}</strong>
                 {event.agent_role && <span className="team-role">{event.agent_role}</span>}
+                {event.recipient_name && <span className="team-arrow">→ {event.recipient_name}</span>}
                 <span className="team-task">{event.task_title || `task #${event.task_id}`}</span>
-                {event.step_index != null && <span className="event-step">step {event.step_index}</span>}
+                {event.step_index != null && <span className="event-step">langkah {event.step_index}</span>}
                 {event.provider && <span className="event-provider">{event.provider}</span>}
+                {event.model && <span className="event-model">{event.model}</span>}
               </div>
               <p className="team-message">{event.message}</p>
             </div>

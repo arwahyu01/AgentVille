@@ -1,9 +1,13 @@
-"""Conversation workflow: clarification turns, versioned plans, explicit approval.
+"""Conversation workflow: clarification turns, versioned plans, automatic execution.
 
 The anchor Task's status IS the conversation lifecycle state — this module never
-duplicates it. Child step tasks are only materialised once the anchor reaches
-'approved', so tool execution is structurally gated behind user approval.
+duplicates it. A proposed plan is approved by the office leader right away and its steps
+are materialised as assigned child tasks, so the team starts working without a manual
+gate. Approval rows are still recorded (decided_by="office-leader") so the audit trail is
+complete, and /approve stays idempotent for older clients.
 """
+
+import json
 
 from sqlalchemy.orm import Session
 
@@ -11,7 +15,10 @@ from app.models import Agent, Approval, Conversation, Message, Plan, Task
 from app.plan_schema import TaskPlan
 from app.rooms import room_for_role
 from app.settings_store import plan_max_depth, plan_max_steps
-from app.task_service import add_event, seat_agent, transition
+from app.task_service import add_event, force_transition, say, seat_agent, transition
+
+# Who signs an auto-approval: the office decides, the user gets the log instead of a gate.
+LEADER_IDENTITY = "office-leader"
 
 
 class ConversationError(Exception):
@@ -176,7 +183,12 @@ def plan_history(db: Session, conversation_id: int) -> list[Plan]:
 
 
 def propose_plan(db: Session, conversation_id: int, plan: TaskPlan, summary: str = "") -> Plan:
-    """Validate and store a new plan version; supersedes any pending proposal."""
+    """Validate, store a new plan version, then start execution immediately.
+
+    The office leader (the Coordinator) signs the plan off, the steps become real assigned
+    tasks, and the crew is briefed in the meeting room. The user watches the log and the
+    work instead of approving every plan.
+    """
     conv = get_conversation(db, conversation_id)
     plan.validate_for_conversation()
     plan.validate_for_budget(plan_max_steps(db), plan_max_depth(db))
@@ -195,11 +207,61 @@ def propose_plan(db: Session, conversation_id: int, plan: TaskPlan, summary: str
                summary=summary or plan.summary, steps_json=plan.model_dump_json())
     db.add(row)
     transition(db, anchor, "awaiting_approval",
-               f"Plan v{version} proposed ({len(plan.steps)} steps) — waiting for approval",
+               f"Plan v{version} proposed ({len(plan.steps)} steps)",
                event_type="plan_proposed", conversation_id=conv.id)
     db.refresh(row)
     _start_plan_meeting(db, conv, anchor, row, plan)
+    # No manual gate: the leader briefs the crew, signs the plan and execution is queued.
+    approve_plan(db, conv.id, version, decided_by=LEADER_IDENTITY)
     return row
+
+
+def materialise_steps(db: Session, conv: Conversation, anchor: Task, plan: TaskPlan) -> list[Task]:
+    """Turn plan steps into assigned child tasks right away. Each specialist is told by the
+    leader what it owns and who depends on it, so the team conversation shows real
+    instructions rather than only status changes."""
+    by_role: dict[str, Agent] = {}
+    for agent in db.query(Agent).order_by(Agent.id).all():
+        by_role.setdefault(agent.role, agent)
+    leader = db.get(Agent, anchor.agent_id) if anchor.agent_id else None
+    leader = leader or _coordinator_agent(db)
+    children: list[Task] = []
+    for index, step in enumerate(plan.steps):
+        agent = by_role.get(step.agent_role)
+        child = Task(title=step.title[:160], description=step.instruction,
+                     status="pending", priority="normal",
+                     agent_id=agent.id if agent else None, parent_id=anchor.id,
+                     run_mode="ai", plan_step_index=index,
+                     required="1" if step.required else "0",
+                     depends_on_json=json.dumps(step.depends_on),
+                     acceptance_criteria=json.dumps(step.acceptance_criteria),
+                     conversation_id=conv.id)
+        db.add(child)
+        children.append(child)
+    db.flush()
+    for index, (step, child) in enumerate(zip(plan.steps, children)):
+        role = step.agent_role
+        room = room_for_role(role)
+        station = f"{room}-{index}"
+        owner = db.get(Agent, child.agent_id) if child.agent_id else None
+        if owner is not None:
+            seat_agent(db, owner.id, room=room, workstation=station, step_index=index,
+                       target_room="")
+            add_event(db, child.id, "task_assigned",
+                      f"Langkah {index}: {child.title[:120]}",
+                      conversation_id=conv.id, agent_id=owner.id, step_index=index,
+                      actor_agent_id=owner.id, to_room=room)
+        depends = ", ".join(f"#{d}" for d in step.depends_on) or "langsung"
+        say(db, child.id, leader,
+            f"{owner.name if owner else role}, kamu memegang langkah {index}: "
+            f"{step.title}. Prasyarat: {depends}. "
+            f"Kriteria diterima: {'; '.join(step.acceptance_criteria) or 'selesaikan sesuai instruksi'}.",
+            recipient=owner, conversation_id=conv.id, step_index=index)
+    return children
+
+
+def _coordinator_agent(db: Session) -> Agent | None:
+    return db.query(Agent).filter(Agent.role == "AI Coordinator").order_by(Agent.id).first()
 
 
 def proposal_message(db: Session, conv: Conversation, row: Plan, plan: TaskPlan) -> str:
@@ -230,14 +292,19 @@ def proposal_message(db: Session, conv: Conversation, row: Plan, plan: TaskPlan)
         lines.extend(f"- {criterion[:200]}" for criterion in plan.acceptance_criteria)
     lines.append("")
     if conv.channel == "telegram":
-        lines.append(f"Approve with: /approve {row.version} — or send /revise <notes> for a redraft.")
+        lines.append(f"Work starts automatically. Send /revise <notes> to stop it and redraft.")
     else:
-        lines.append(f"Approve version {row.version} in the Requests panel, or ask for a revision first.")
+        lines.append("Work starts automatically — watch the office log, or request a revision to redraft.")
     return "\n".join(lines)
 
 
 def approve_plan(db: Session, conversation_id: int, plan_version: int,
                  decided_by: str = "local") -> Plan:
+    """Record the approval decision and release the plan for execution.
+
+    Called automatically by propose_plan (decided_by="office-leader") and still exposed by
+    the API so a human can sign an older proposal. Approval is idempotent: the first call
+    materialises the step tasks, later calls just return the same row."""
     conv = get_conversation(db, conversation_id)
     if plan_version != conv.current_plan_version or conv.current_plan_version == 0:
         raise ConversationError(f"Plan v{plan_version} is not the current proposal (v{conv.current_plan_version})")
@@ -255,28 +322,50 @@ def approve_plan(db: Session, conversation_id: int, plan_version: int,
         raise ConversationError(f"Nothing awaiting approval (task is '{anchor.status}')")
     if row.status != "proposed":
         raise ConversationError(f"Plan v{plan_version} is '{row.status}', not approvable")
+    plan = _plan_of(row)
     row.status = "approved"
     db.add(Approval(plan_id=row.id, conversation_id=conv.id, decision="approved", decided_by=decided_by))
     transition(db, anchor, "approved", f"Plan v{plan_version} approved by {decided_by}",
                event_type="plan_approved", conversation_id=conv.id)
     _end_plan_meeting(db, conv, anchor, row, f"v{plan_version} disetujui")
+    if plan is not None:
+        materialise_steps(db, conv, anchor, plan)
+        leader = _coordinator_agent(db)
+        say(db, anchor.id, leader,
+            f"Rencana v{plan_version} disetujui. Tim, mulai kerjakan {len(plan.steps)} langkah — "
+            f"lapor ke saya kalau ada yang macet.",
+            conversation_id=conv.id)
+    db.commit()
     db.refresh(row)
     return row
 
 
 def request_revision(db: Session, conversation_id: int, notes: str,
                      decided_by: str = "local") -> Conversation:
+    """Ask the Coordinator for a different plan. Because plans start automatically, a revision
+    also stops whatever this request already spawned, then returns the anchor to clarifying."""
     conv = get_conversation(db, conversation_id)
     anchor = _anchor(db, conv)
-    if anchor.status != "awaiting_approval":
+    allowed = ("clarifying", "awaiting_approval", "approved", "queued", "running")
+    if anchor.status not in allowed or conv.current_plan_version == 0:
         raise ConversationError(f"Cannot request a revision while task is '{anchor.status}'")
     row = get_plan_row(db, conv.id, conv.current_plan_version)
     if row is not None:
         db.add(Approval(plan_id=row.id, conversation_id=conv.id, decision="revision",
                         decided_by=decided_by, reason=notes[:2000]))
     db.add(Message(conversation_id=conv.id, role="user", content=notes, channel=conv.channel))
-    transition(db, anchor, "clarifying", "Revision requested; Coordinator will redraft",
-               event_type="revision_requested", conversation_id=conv.id)
+    for child in db.query(Task).filter(Task.parent_id == anchor.id).all():
+        if child.status in ("pending", "queued", "running"):
+            force_transition(db, child, "cancelled", "Cancelled because the plan is being revised")
+    if anchor.status == "clarifying":
+        # Redrafting before anything ran: the state is already right, only the log changes.
+        add_event(db, anchor.id, "revision_requested",
+                  "Revision requested; Coordinator will redraft",
+                  conversation_id=conv.id)
+        db.commit()
+    else:
+        transition(db, anchor, "clarifying", "Revision requested; Coordinator will redraft",
+                   event_type="revision_requested", conversation_id=conv.id)
     _end_plan_meeting(db, conv, anchor, row, "revisi diminta")
     db.refresh(conv)
     return conv
@@ -290,6 +379,9 @@ def cancel_conversation(db: Session, conversation_id: int) -> Conversation:
     pending = db.query(Plan).filter(Plan.conversation_id == conv.id, Plan.status == "proposed").all()
     for row in pending:
         row.status = "cancelled"
+    for child in db.query(Task).filter(Task.parent_id == anchor.id).all():
+        if child.status in ("pending", "queued", "running", "reviewing"):
+            force_transition(db, child, "cancelled", "Cancelled with the request")
     transition(db, anchor, "cancelled", "Conversation cancelled",
                event_type="conversation_cancelled", conversation_id=conv.id)
     if pending:

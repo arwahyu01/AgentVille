@@ -6,8 +6,11 @@ from sqlalchemy.orm import Session
 from app import settings_store
 from app.database import get_db
 from app.models import Agent, Conversation, Plan, Task
-from app.schemas import ExecuteRequest, QcReviewRead, TaskCreate, TaskRead, TaskUpdate, TaskEventRead, TaskResultRead
-from app.task_service import ALLOWED_TRANSITIONS, CONVERSATION_STATES, add_event, transition, TransitionError
+from app.schemas import (ClearTasksResult, ExecuteRequest, QcReviewRead, ReassignRequest, TaskCreate,
+                         TaskRead, TaskUpdate, TaskEventRead, TaskResultRead)
+from app.task_service import (ACTIVE_STATUSES, ALLOWED_TRANSITIONS, CONVERSATION_STATES, add_event,
+                              cancel_tree, clear_active_tasks, say, seat_agent, transition,
+                              TransitionError)
 
 router = APIRouter(tags=["tasks"])
 
@@ -54,6 +57,7 @@ def get_task_result(task_id: int, db: Session = Depends(get_db)):
         except ValueError:
             plan_steps = []
     diff_file = ARTIFACTS_DIR / f"task-{task_id}.diff.txt"
+    from app.api.preview import build_preview
     return TaskResultRead(
         id=task.id, title=task.title, status=task.status, run_mode=task.run_mode,
         result=task.result, artifact_path=task.artifact_path,
@@ -62,6 +66,7 @@ def get_task_result(task_id: int, db: Session = Depends(get_db)):
         qc_reviews=[QcReviewRead.model_validate(r) for r in
                     db.query(QcReview).filter(QcReview.task_id == task_id).order_by(QcReview.iteration).all()],
         diff_path=str(diff_file.relative_to(ARTIFACTS_DIR.parents[1])) if diff_file.exists() else "",
+        preview=build_preview(task, db),
     )
 
 @router.post("/tasks/{task_id}/execute", response_model=TaskRead)
@@ -160,6 +165,67 @@ def cancel_task(task_id: int, db: Session = Depends(get_db)):
         task = transition(db, task, "cancelled", "Task cancelled by user", "cancelled")
     except TransitionError:
         raise HTTPException(status_code=409, detail=f"Task cannot be cancelled from status {task.status}")
+    return task
+
+
+@router.post("/tasks/{task_id}/stop", response_model=TaskRead)
+def stop_task(task_id: int, db: Session = Depends(get_db)):
+    """Stop one running request together with every step it spawned; history is kept."""
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status not in ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Task is not running (status {task.status})")
+    try:
+        task = cancel_tree(db, task, "Stopped from the console")
+    except TransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return db.get(Task, task_id)
+
+
+@router.post("/tasks/clear", response_model=ClearTasksResult)
+def clear_tasks(db: Session = Depends(get_db)):
+    """"Clear all tasks" = stop everything in flight. Completed/failed/cancelled history stays."""
+    return ClearTasksResult(**clear_active_tasks(db))
+
+
+@router.post("/tasks/{task_id}/reassign", response_model=TaskRead)
+def reassign_task(task_id: int, payload: ReassignRequest, db: Session = Depends(get_db)):
+    """Leader hand-over: give a step task to another employee and let it retry immediately.
+
+    The instruction is recorded as an agent_chat frame addressed to the new owner, so the team
+    feed shows the rescue exactly as it happened (who was told, why, by whom)."""
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    agent = db.get(Agent, payload.agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    leader = db.query(Agent).filter(Agent.role == "AI Coordinator").order_by(Agent.id).first()
+    previous = db.get(Agent, task.agent_id) if task.agent_id else None
+    task.agent_id = agent.id
+    task.updated_at = datetime.now(timezone.utc)
+    if task.status in ("pending", "queued"):
+        task.status = "queued"
+    elif task.status in ("failed", "cancelled"):
+        task.status = "queued"
+    note = payload.note.strip() or "pekerjaan ini dialihkan karena pemegang sebelumnya tidak selesai"
+    say(db, task.id, leader,
+        f"{agent.name}, ambil alih \"{task.title[:120]}\" dari "
+        f"{previous.name if previous else 'pemegang sebelumnya'}. Alasan: {note}. "
+        "Kerjakan sampai tuntas dan laporkan hasilnya.",
+        recipient=agent, conversation_id=task.conversation_id,
+        step_index=task.plan_step_index)
+    add_event(db, task.id, "reassigned",
+              f"{task.title[:120]} dialihkan ke {agent.name} ({agent.role})",
+              conversation_id=task.conversation_id, agent_id=agent.id,
+              step_index=task.plan_step_index, actor_agent_id=leader.id if leader else None,
+              recipient_agent_id=agent.id)
+    room = agent.current_room or ""
+    if room:
+        seat_agent(db, agent.id, room=room, step_index=task.plan_step_index)
+    db.commit()
+    db.refresh(task)
     return task
 
 @router.get("/tasks/{task_id}/events", response_model=list[TaskEventRead])

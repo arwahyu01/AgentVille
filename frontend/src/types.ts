@@ -29,6 +29,8 @@ export interface Task {
   artifact_path: string
   provider_used?: string | null
   model_used?: string | null
+  plan_step_index?: number | null
+  required?: string
   created_at: string
   updated_at: string
 }
@@ -108,6 +110,22 @@ export interface QcReview {
   evidence: string
 }
 
+export type PreviewKind = 'web' | 'image' | 'video' | 'markdown' | 'text' | 'none'
+
+export interface PreviewFile {
+  path: string
+  size: number
+}
+
+/** What the crew actually produced: a site, an image, a video or a document. */
+export interface PreviewInfo {
+  kind: PreviewKind
+  entry: string
+  url: string
+  size: number
+  files: PreviewFile[]
+}
+
 export interface TaskResult {
   id: number
   title: string
@@ -119,6 +137,7 @@ export interface TaskResult {
   plan_steps?: PlanStep[]
   qc_reviews?: QcReview[]
   diff_path?: string
+  preview?: PreviewInfo
 }
 
 export interface TaskEvent {
@@ -177,6 +196,16 @@ export interface TeamEvent {
   step_index: number | null
   provider: string | null
   model: string | null
+  actor_agent_id?: number | null
+  actor_name?: string | null
+  recipient_agent_id?: number | null
+  recipient_name?: string | null
+  conversation_id?: number | null
+}
+
+export interface ClearTasksResult {
+  stopped: number[]
+  count: number
 }
 
 export interface CharacterChatTurn {

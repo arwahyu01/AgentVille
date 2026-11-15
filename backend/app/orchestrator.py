@@ -20,9 +20,9 @@ from app.qc_evidence import build_evidence
 from app.qc_schema import criterion_ids, validate_qc_payload
 from app.settings_store import (ai_enabled, ai_fallback_enabled, ai_model, ai_model_for,
                                 ai_provider, ai_retry_max, ai_timeout_s, get_setting,
-                                lease_seconds, max_concurrency, merge_policy,
+                                lease_seconds, max_concurrency, max_parallel_jobs, merge_policy,
                                 plan_max_depth, plan_max_steps)
-from app.task_service import (add_event, save_result, transition,
+from app.task_service import (add_event, save_result, transition, say,
                               force_transition, claim_task, heartbeat, release_lease,
                               seat_agent, TransitionError)
 from app.rooms import room_for_role
@@ -35,19 +35,23 @@ __all__ = ["Orchestrator", "VALID_ROLES", "PlanStep", "TaskPlan", "extract_json"
 
 
 class Orchestrator(threading.Thread):
-    """Background worker: one thread, one task at a time.
+    """Background scheduler for the office.
 
     Tick phases:
       1. conversation turn  — a clarifying anchor whose last message is from the user
                               gets a Coordinator reply (ask a question or propose a plan).
       2. approved anchors   — move into the queue.
-      3. claim + execute    — legacy ai/ai_plan tasks and conversation anchors whose approved
-                              plan is materialised into step tasks, run and QC-reviewed.
+      3. dispatch           — each queued conversation/anchor is handed to its own worker
+                              thread, so several requests run at the same time. Inside a
+                              request, independent DAG steps also run concurrently.
     All state changes go through task_service so events, agent status and the transition
     table stay consistent."""
 
     RETRY_BACKOFF_S = 5.0
     POLL_INTERVAL_S = 1.0
+    # One request consumes a slot, so the office never starts more jobs than the configured
+    # worker budget; each job may still fan out its own DAG across the steps pool.
+    MAX_RUNNING_REQUESTS = 4
 
     def __init__(self, provider: AIProvider | None = None) -> None:
         super().__init__(daemon=True, name="agentville-orchestrator")
@@ -58,6 +62,10 @@ class Orchestrator(threading.Thread):
         # through one lock so parallel steps never clobber each other's row state. The slow
         # part (the provider call) runs outside this lock, so nodes still execute in parallel.
         self._db_lock = threading.RLock()
+        # Anchors currently executing in a worker thread, so the next tick does not start
+        # the same request twice while it is legitimately in flight.
+        self._jobs: dict[int, threading.Thread] = {}
+        self._jobs_lock = threading.Lock()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -76,13 +84,32 @@ class Orchestrator(threading.Thread):
             except Exception:
                 logger.exception("orchestrator tick failed")
             self._stop_event.wait(self.POLL_INTERVAL_S)
+        self._join_jobs()
+
+    def _join_jobs(self, timeout: float = 5.0) -> None:
+        with self._jobs_lock:
+            jobs = list(self._jobs.values())
+        for job in jobs:
+            job.join(timeout=timeout)
+
+    def _prune_jobs(self) -> None:
+        with self._jobs_lock:
+            for anchor_id, job in list(self._jobs.items()):
+                if not job.is_alive():
+                    self._jobs.pop(anchor_id, None)
 
     def recover_interrupted(self) -> None:
         with SessionLocal() as db:
             for task in db.query(Task).filter(Task.status == "running").all():
                 force_transition(db, task, "failed", "Run interrupted by backend restart", "interrupted")
 
-    def _tick(self) -> None:
+    def _tick(self, wait: bool = True) -> None:
+        """One scheduling pass.
+
+        `wait=True` runs this pass synchronously (deterministic for tests and for callers
+        that want the work finished). The live worker loop uses wait=False so the next
+        conversation turn is not blocked by long-running jobs."""
+        self._prune_jobs()
         with SessionLocal() as db:
             if not ai_enabled(db):
                 return
@@ -93,28 +120,71 @@ class Orchestrator(threading.Thread):
                 transition(db, anchor, "queued", "Approved plan queued for execution")
             # phase 1: one conversation turn per tick (cheap text call, keeps ordering simple)
             turn = self._next_conversation_turn(db)
-            qc_rerun = False
             if turn is not None:
                 anchor_id, conv_id, timeout_s = turn
+                jobs = []
             else:
-                task = (db.query(Task)
-                        .filter(Task.parent_id.is_(None), Task.status == "queued",
-                                Task.run_mode.in_(["ai", "ai_plan", "conversation"]))
-                        .order_by(Task.id).first())
-                if task is None:
-                    return
-                anchor_id, conv_id = task.id, task.conversation_id
-                run_mode = task.run_mode
-                qc_rerun = bool(task.qc_rerun_requested) and run_mode == "conversation"
-                model = ai_model(db)
-                timeout_s = ai_timeout_s(db)
-                transition(db, task, "running", "QC rerun started" if qc_rerun else "AI run started")
+                jobs = self._claim_jobs(db)
         if turn is not None:
             self._conversation_turn(anchor_id, conv_id, timeout_s)
-        elif qc_rerun:
-            self._execute_conversation_qc(anchor_id, timeout_s)
-        else:
-            self._execute(anchor_id, run_mode, model, timeout_s)
+            return
+        self._start_jobs(jobs, wait=wait)
+
+    def _claim_jobs(self, db) -> list[tuple[int, str, str, int]]:
+        """Mark every queued anchor as running and return the work each job should do."""
+        with self._jobs_lock:
+            in_flight = {aid for aid, job in self._jobs.items() if job.is_alive()}
+        budget = max(1, max_parallel_jobs(db)) - len(in_flight)
+        jobs: list[tuple[int, str, str, int]] = []
+        if budget <= 0:
+            return jobs
+        queued = (db.query(Task)
+                  .filter(Task.parent_id.is_(None), Task.status == "queued",
+                          Task.run_mode.in_(["ai", "ai_plan", "conversation"]))
+                  .order_by(Task.id).all())
+        for task in queued:
+            if len(jobs) >= budget:
+                break
+            if task.id in in_flight:
+                continue
+            run_mode = task.run_mode
+            qc_rerun = bool(task.qc_rerun_requested) and run_mode == "conversation"
+            model = ai_model(db)
+            timeout_s = ai_timeout_s(db)
+            transition(db, task, "running", "QC rerun started" if qc_rerun else "AI run started")
+            jobs.append((task.id, "conversation_qc" if qc_rerun else run_mode, model, timeout_s))
+        return jobs
+
+    def _start_jobs(self, jobs: list[tuple[int, str, str, int]], wait: bool = True) -> None:
+        """Run each request on its own thread so several jobs share the office at once."""
+        if not jobs:
+            return
+        errors: list[BaseException] = []
+
+        def run_job(anchor_id: int, run_mode: str, model: str, timeout_s: int) -> None:
+            try:
+                if run_mode == "conversation_qc":
+                    self._execute_conversation_qc(anchor_id, timeout_s)
+                elif run_mode == "conversation":
+                    self._execute_conversation(anchor_id, timeout_s)
+                else:
+                    self._execute(anchor_id, run_mode, model, timeout_s)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                logger.exception("job %s failed", anchor_id)
+                self._abort_anchor(anchor_id, f"Worker crashed: {exc}")
+
+        threads: list[threading.Thread] = []
+        for anchor_id, run_mode, model, timeout_s in jobs:
+            job = threading.Thread(target=run_job, name=f"agentville-job-{anchor_id}",
+                                   args=(anchor_id, run_mode, model, timeout_s), daemon=True)
+            with self._jobs_lock:
+                self._jobs[anchor_id] = job
+            job.start()
+            threads.append(job)
+        if wait:
+            for job in threads:
+                job.join()
 
     # -- conversation turns --------------------------------------------------
 
@@ -336,6 +406,106 @@ class Orchestrator(threading.Thread):
             return None
         return result
 
+    # -- leader & team conversation ------------------------------------------
+
+    def _leader(self, db) -> Agent | None:
+        """The one leader of the office: the Coordinator's seat. Every instruction, rescue
+        and report to the user is signed by this agent."""
+        return db.query(Agent).filter(Agent.role == "AI Coordinator").order_by(Agent.id).first()
+
+    def _report_done(self, db, anchor_id: int, conversation_id: int, text: str) -> None:
+        leader = self._leader(db)
+        add_event(db, anchor_id, "task_done", text[:600], conversation_id=conversation_id,
+                  actor_agent_id=leader.id if leader else None,
+                  agent_id=leader.id if leader else None)
+
+    def _rescue_candidates(self, db, step: PlanStep, blocked_id: int | None) -> list[Agent]:
+        """Who the leader may hand a blocked step to: never the agent that just reported it,
+        free agents before busy ones, and a role that can actually do the work (a step that
+        writes files must land on a coding-capable role)."""
+        busy = {t.agent_id for t in db.query(Task).filter(Task.status == "running").all()
+                if t.agent_id}
+        if step.uses_tools:
+            order = ["Developer", "Backend Developer", "Frontend Developer", "QA Engineer"]
+        else:
+            order = [step.agent_role, "Researcher", "Data Analyst", "Administrator",
+                     "AI Coordinator"]
+        agents = db.query(Agent).order_by(Agent.id).all()
+        ranked: list[Agent] = []
+        for role in order:
+            for agent in agents:
+                if agent.role == role and agent.id != blocked_id and agent not in ranked:
+                    ranked.append(agent)
+        if not step.uses_tools:
+            for agent in agents:  # last resort: anyone not blocked, keep the office moving
+                if agent.id != blocked_id and agent not in ranked:
+                    ranked.append(agent)
+        return ([a for a in ranked if a.id not in busy]
+                + [a for a in ranked if a.id in busy])
+
+    def _escalate_step(self, step: PlanStep, index: int, child_id: int, anchor_id: int,
+                       conversation_id: int, cfg: dict, workspace, timeout_s: int,
+                       instruction: str, outputs: dict[int, str],
+                       reason: str) -> ProviderResult | None:
+        """A specialist that cannot finish says so to the leader (`needs_help`); the leader
+        diagnoses, picks a replacement from the roster and hands the step over, and the
+        replacement retries immediately. Bounded to one rescue per step so a broken provider
+        still fails the plan instead of looping forever."""
+        with self._db_lock, SessionLocal() as db:
+            child = db.get(Task, child_id)
+            owner = db.get(Agent, child.agent_id) if child is not None and child.agent_id else None
+            leader = self._leader(db)
+            say(db, child_id, owner,
+                f"Lapor, langkah {index} ({step.title}) macet: {redact(reason, 220)}. "
+                "Saya butuh arahan untuk melanjutkan.",
+                recipient=leader, conversation_id=conversation_id,
+                event_type="needs_help", step_index=index)
+            if "merge conflict" in reason.lower():
+                # Two agents changed the same lines: no roster swap can fix that safely, so the
+                # leader reports the blocker to the user instead of silently overwriting work.
+                say(db, anchor_id, leader,
+                    f"Langkah {index} tidak bisa saya selesaikan otomatis: {redact(reason, 200)}. "
+                    "Dua agent mengubah bagian yang sama. Saya butuh keputusan user: beri tahu "
+                    "versi mana yang dipertahankan, lalu minta revisi.",
+                    conversation_id=conversation_id, event_type="needs_help", step_index=index)
+                db.commit()
+                return None
+            candidates = self._rescue_candidates(db, step, owner.id if owner else None)
+            replacement = candidates[0] if candidates else None
+            if replacement is None:
+                say(db, anchor_id, leader,
+                    f"Langkah {index} tidak bisa diselamatkan: {redact(reason, 180)}. "
+                    "Tidak ada pengganti di kantor ini, jadi saya hentikan permintaan.",
+                    conversation_id=conversation_id, event_type="agent_chat", step_index=index)
+                db.commit()
+                return None
+            if child is not None:
+                child.agent_id = replacement.id
+                child.status = "running"
+            room = room_for_role(replacement.role)
+            seat_agent(db, replacement.id, room=room, workstation=f"{room}-{index}",
+                       step_index=index, target_room="")
+            say(db, child_id, leader,
+                f"{replacement.name}, ambil alih langkah {index} dari "
+                f"{owner.name if owner else 'pemegang sebelumnya'}. Penyebab macet: "
+                f"{redact(reason, 180)}. Fokus: {step.title}. "
+                f"Kriteria diterima: {'; '.join(step.acceptance_criteria) or 'selesaikan sesuai instruksi'}.",
+                recipient=replacement, conversation_id=conversation_id, step_index=index)
+            add_event(db, child_id, "reassigned",
+                      f"Langkah {index} dialihkan ke {replacement.name} ({replacement.role})",
+                      conversation_id=conversation_id, agent_id=replacement.id,
+                      step_index=index, actor_agent_id=replacement.id)
+            db.commit()
+        persona = self._persona(replacement.role, replacement.name,
+                                self._step_model(cfg, step.uses_tools),
+                                coding=step.uses_tools and workspace is not None,
+                                workspace=str(workspace) if workspace is not None else None)
+        extra = (f"Kamu mengambil alih langkah ini dari rekan yang gagal: {redact(reason, 300)}. "
+                 "Kerjakan sampai tuntas dan laporkan hasilnya.")
+        return self._run_specialist_step(step, index, child_id, anchor_id, persona, outputs,
+                                         instruction, timeout_s, cfg, workspace,
+                                         conversation_id, extra_prompt=extra)
+
     # -- conversation execution ----------------------------------------------
 
     def _exec_config(self) -> dict:
@@ -423,7 +593,9 @@ class Orchestrator(threading.Thread):
             anchor.plan_json = plan_row.steps_json
 
             children = db.query(Task).filter(Task.parent_id == anchor_id).order_by(Task.id).all()
+            created_here = False
             if not children:
+                created_here = True
                 agents_by_role: dict[str, Agent] = {}
                 for agent in db.query(Agent).order_by(Agent.id).all():
                     agents_by_role.setdefault(agent.role, agent)
@@ -454,6 +626,30 @@ class Orchestrator(threading.Thread):
                               f"Assigned to step {idx}: {child.title[:120]}",
                               conversation_id=conv.id, agent_id=child.agent_id,
                               step_index=idx, actor_agent_id=child.agent_id, to_room=room)
+            # The leader opens the work: one instruction per step, spoken to its owner, so the
+            # team feed shows who was told to do what before any output exists. Materialised
+            # plans (the normal path) already carry these instructions from propose_plan.
+            leader = self._leader(db)
+            if leader is not None and created_here:
+                say(db, anchor_id, leader,
+                    f"Rekan-rekan, kita mulai permintaan #{anchor_id}: {anchor.title[:120]}. "
+                    f"Rencana {len(plan.steps)} langkah sudah disetujui. "
+                    "Kerjakan bagian masing-masing dan lapor kalau ada hambatan.",
+                    conversation_id=conv.id)
+                for child in children:
+                    idx = child.plan_step_index if child.plan_step_index is not None else 0
+                    if child.agent_id is None:
+                        continue
+                    owner = db.get(Agent, child.agent_id)
+                    step = plan.steps[idx] if idx < len(plan.steps) else None
+                    criteria = "; ".join(step.acceptance_criteria) if step else ""
+                    deps = sorted(step.depends_on) if step else []
+                    wait = f" Tunggu hasil langkah {deps} dulu." if deps else ""
+                    say(db, child.id, leader,
+                        f"{owner.name if owner else 'Rekan'}, pegang langkah {idx}: "
+                        f"{child.title[:140]}.{wait} "
+                        f"Kriteria diterima: {criteria or 'selesaikan sesuai instruksi'}.",
+                        recipient=owner, conversation_id=conv.id, step_index=idx)
             # Backfill dependency edges for plans materialised before the DAG columns existed.
             if all(not c.depends_on_json for c in children):
                 for child, step in zip(children, plan.steps):
@@ -503,23 +699,38 @@ class Orchestrator(threading.Thread):
                 return
             for i in ready:
                 result = outcomes[i]
-                if result.ok:
-                    outputs[i] = result.text
-                    completed.add(i)
-                    with SessionLocal() as db:
-                        child = db.get(Task, child_ids[i])
-                        add_event(db, child.id, "step_completed",
-                                  f"Step {i} done in {result.latency_s:.1f}s",
-                                  conversation_id=conv.id, agent_id=child.agent_id,
-                                  provider=result.provider, model=result.model, step_index=i)
-                        save_result(db, child, result.text)
-                        release_lease(db, child.id)
-                        transition(db, child, "completed", "Step completed")
-                    self._record_handoffs(i, plan.steps, child_ids, outputs, conv.id)
-                else:
-                    self._fail_plan(anchor_id, child_ids[i], i, conv.id,
-                                    f"Step {i} failed: {str(result.error)[:300]}")
-                    return
+                if not result.ok:
+                    # The specialist reports the blocker to the leader instead of the plan
+                    # dying silently: the leader finds a replacement and the step retries.
+                    reason = f"Step {i} failed: {str(result.error)[:300]}"
+                    rescued = self._escalate_step(
+                        plan.steps[i], i, child_ids[i], anchor_id, conv.id, cfg, base_ws,
+                        timeout_s, instruction, outputs, reason)
+                    if rescued is None or not rescued.ok:
+                        detail = reason if rescued is None else \
+                            f"Step {i} failed again after reassignment: {str(rescued.error)[:300]}"
+                        self._fail_plan(anchor_id, child_ids[i], i, conv.id, detail)
+                        return
+                    result = rescued
+                outputs[i] = result.text
+                completed.add(i)
+                with SessionLocal() as db:
+                    child = db.get(Task, child_ids[i])
+                    add_event(db, child.id, "step_completed",
+                              f"Step {i} done in {result.latency_s:.1f}s",
+                              conversation_id=conv.id, agent_id=child.agent_id,
+                              provider=result.provider, model=result.model, step_index=i)
+                    save_result(db, child, result.text)
+                    release_lease(db, child.id)
+                    transition(db, child, "completed", "Step completed")
+                    owner = db.get(Agent, child.agent_id) if child.agent_id else None
+                    leader = self._leader(db)
+                    say(db, child.id, owner,
+                        f"Langkah {i} ({plan.steps[i].title}) selesai. "
+                        f"Hasil tersimpan di {child.artifact_path or f'task-{child.id}.md'}.",
+                        recipient=leader, conversation_id=conv.id, step_index=i)
+                    db.commit()
+                self._record_handoffs(i, plan.steps, child_ids, outputs, conv.id)
             remaining -= set(ready)
 
         self._qc_phase(anchor_id, conv.id, plan_row.id, plan, instruction, outputs, cfg, base_ws, timeout_s)
@@ -969,6 +1180,15 @@ class Orchestrator(threading.Thread):
                         self._store_diff_artifact(anchor_id, status, diff)
                     save_result(db, anchor, summary)
                     transition(db, anchor, "completed", "QC passed")
+                    self._report_done(db, anchor_id, conversation_id,
+                                      f"Selesai: {anchor.title[:120]}. QC lulus dan semua langkah "
+                                      f"wajib tuntas. Hasil kerja ada di {anchor.artifact_path or 'artefak task'}.")
+                    if conversation_id:
+                        conversation_service.add_message(
+                            db, conversation_id,
+                            f"Pekerjaan selesai: {anchor.title}. QC lulus dan semua langkah wajib sudah "
+                            f"tuntas. Hasil tersimpan di {anchor.artifact_path or 'artefak task'}.",
+                            role="assistant")
                     self._end_meeting(db, anchor_id, conversation_id, participants)
                     return
                 if verdict == "pass":
@@ -980,12 +1200,26 @@ class Orchestrator(threading.Thread):
                         and iteration <= cfg["retry_max"] and failed_steps):
                     transition(db, anchor, "running",
                                f"QC round {iteration} failed; revising steps {failed_steps}")
+                    leader = self._leader(db)
+                    if leader is not None:
+                        say(db, anchor_id, leader,
+                            f"QC putaran {iteration} menemukan masalah di langkah "
+                            f"{failed_steps}: {redact(findings, 200)}. "
+                            "Pemilik langkah saya minta perbaiki sekarang, lalu kita review ulang.",
+                            conversation_id=conversation_id)
                     self._review_visits(db, anchor_id, conversation_id, failed_steps, findings)
                     db.commit()
                 else:
                     reason = ("QC failed" if verdict == "fail"
                               else "QC verdict unreadable or QC run failed — treating as failure")
                     transition(db, anchor, "failed", reason)
+                    leader = self._leader(db)
+                    if leader is not None:
+                        say(db, anchor_id, leader,
+                            f"Permintaan #{anchor_id} gagal: {reason}. "
+                            f"Temuan QC: {redact(findings, 220) or 'tidak ada detail'}. "
+                            "Saya butuh keputusan user untuk melanjutkan (revisi atau batalkan).",
+                            conversation_id=conversation_id, event_type="needs_help")
                     self._end_meeting(db, anchor_id, conversation_id, participants)
                     return
             if not allow_revision:

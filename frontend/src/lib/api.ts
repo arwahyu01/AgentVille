@@ -1,4 +1,4 @@
-import type { Agent, AiConfig, ChannelStatus, ClaudeSession,CharacterChatReply, CharacterChatTurn, ChatMessage, Conversation, PlanInfo, PlanRead, ProviderName, Task, TaskEvent, TaskResult, TeamEvent } from '../types'
+import type { Agent, AiConfig, ChannelStatus, ClaudeSession, CharacterChatReply, CharacterChatTurn, ChatMessage, ClearTasksResult, Conversation, PlanInfo, PlanRead, ProviderName, Task, TaskEvent, TaskResult, TeamEvent } from '../types'
 
 // Relative by default so the page keeps working when opened from another device on the LAN;
 // Vite proxies `/api` to the backend. Override with VITE_API_BASE only for split deployments.
@@ -26,6 +26,10 @@ export const api = {
   updateTask: (id: number, payload: Partial<Pick<Task, 'title' | 'description' | 'priority' | 'agent_id' | 'status'>>) =>
     request<Task>(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   cancelTask: (id: number) => request<Task>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
+  stopTask: (id: number) => request<Task>(`/api/tasks/${id}/stop`, { method: 'POST' }),
+  clearTasks: () => request<ClearTasksResult>('/api/tasks/clear', { method: 'POST' }),
+  reassignTask: (id: number, agent_id: number, note = '') =>
+    request<Task>(`/api/tasks/${id}/reassign`, { method: 'POST', body: JSON.stringify({ agent_id, note }) }),
   aiConfig: () => request<AiConfig>('/api/ai/config'),
   claudeSessions: () => request<{ sessions: ClaudeSession[] }>('/api/claude/sessions'),
   patchAiConfig: (payload: Partial<AiConfig>) =>
@@ -34,6 +38,7 @@ export const api = {
     request<{ models: string[] }>(`/api/ai/models${provider ? `?provider=${provider}` : ''}`),
   executeTask: (id: number, mode: 'direct' | 'plan') =>
     request<Task>(`/api/tasks/${id}/execute`, { method: 'POST', body: JSON.stringify({ mode }) }),
+  qcRerun: (id: number) => request<Task>(`/api/tasks/${id}/qc-rerun`, { method: 'POST' }),
   taskResult: (id: number) => request<TaskResult>(`/api/tasks/${id}/result`),
   conversations: () => request<Conversation[]>('/api/conversations'),
   createConversation: (first_message: string) =>
@@ -49,7 +54,8 @@ export const api = {
   cancelConversation: (id: number) =>
     request<Conversation>(`/api/conversations/${id}/cancel`, { method: 'POST' }),
   channelsStatus: () => request<ChannelStatus>('/api/channels/status'),
-  teamEvents: (limit = 60) => request<TeamEvent[]>(`/api/events/team?limit=${limit}`),
+  teamEvents: (limit = 60, conversationId?: number) =>
+    request<TeamEvent[]>(`/api/events/team?limit=${limit}${conversationId ? `&conversation_id=${conversationId}` : ''}`),
   characterChat: (character: string, message: string, history: CharacterChatTurn[], signal?: AbortSignal) =>
     request<CharacterChatReply>('/api/characters/chat', {
       method: 'POST',

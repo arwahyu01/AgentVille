@@ -49,6 +49,8 @@ class TaskRead(BaseModel):
     provider_used: str | None = None
     model_used: str | None = None
     qc_rerun_requested: bool = False
+    plan_step_index: int | None = None
+    required: str = "1"
     created_at: datetime
     updated_at: datetime
 
@@ -63,6 +65,20 @@ class QcReviewRead(BaseModel):
     provider: str | None = None
     model: str | None = None
 
+class PreviewFile(BaseModel):
+    path: str
+    size: int = 0
+
+
+class PreviewRead(BaseModel):
+    """What the crew actually produced, ready for the UI to render."""
+    kind: Literal["web", "image", "video", "markdown", "text", "none"] = "none"
+    entry: str = ""
+    url: str = ""
+    size: int = 0
+    files: list[PreviewFile] = []
+
+
 class TaskResultRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -75,6 +91,7 @@ class TaskResultRead(BaseModel):
     plan_steps: list[dict] = []
     qc_reviews: list[QcReviewRead] = []
     diff_path: str = ""
+    preview: PreviewRead = Field(default_factory=PreviewRead)
 
 class ExecuteRequest(BaseModel):
     mode: Literal["direct", "plan"] = "direct"
@@ -132,8 +149,8 @@ class OfficeEventRead(BaseModel):
     created_at: datetime
 
 class TeamEventRead(BaseModel):
-    """A journal frame enriched for the Team Conversation panel: who spoke (name/role)
-    and which task/step the update belongs to."""
+    """A journal frame enriched for the Team Conversation panel: who spoke (name/role),
+    who it was addressed to, and which task/step the update belongs to."""
     id: int
     task_id: int
     task_title: str
@@ -146,6 +163,20 @@ class TeamEventRead(BaseModel):
     step_index: int | None = None
     provider: str | None = None
     model: str | None = None
+    actor_agent_id: int | None = None
+    actor_name: str | None = None
+    recipient_agent_id: int | None = None
+    recipient_name: str | None = None
+    conversation_id: int | None = None
+
+class ReassignRequest(BaseModel):
+    """Hand a stuck step to another employee, with the leader's reason attached."""
+    agent_id: int
+    note: str = Field(default="", max_length=1000)
+
+class ClearTasksResult(BaseModel):
+    stopped: list[int] = []
+    count: int = 0
 
 class ConversationCreate(BaseModel):
     first_message: str = Field(min_length=1, max_length=4000)

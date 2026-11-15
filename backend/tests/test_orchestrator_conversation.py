@@ -141,13 +141,12 @@ def messages_for(session_factory, conv_id):
 
 
 def drive_to_approval(session_factory):
-    """Runs the clarify→propose turn and approves plan v1."""
+    """Runs the clarify→propose turn. The leader signs the plan off immediately, so the
+    request is already 'approved' with its step tasks materialised — ready to execute."""
     conv_id, anchor_id = start_conversation(session_factory)
     tick.provider = FakeProvider([propose_json()])
     tick(session_factory)
-    assert state(session_factory, anchor_id) == "awaiting_approval"
-    with session_factory() as db:
-        conversation_service.approve_plan(db, conv_id, 1)
+    assert state(session_factory, anchor_id) == "approved"
     return conv_id, anchor_id
 
 
@@ -169,15 +168,25 @@ def test_ask_turn_stores_question_and_waits_for_reply(conv_db):
     assert len(tick.provider.calls) == 0
 
 
-def test_propose_turn_creates_plan_and_awaits_approval(conv_db):
+def test_propose_turn_creates_plan_and_starts_work(conv_db):
     conv_id, anchor_id = start_conversation(conv_db)
     tick.provider = FakeProvider([propose_json()])
     tick(conv_db)
-    assert state(conv_db, anchor_id) == "awaiting_approval"
+    # No manual gate: the leader approves, the plan is approved and its steps are real tasks.
+    assert state(conv_db, anchor_id) == "approved"
     with conv_db() as db:
         row = db.query(Plan).filter(Plan.conversation_id == conv_id).one()
-        assert row.version == 1 and row.status == "proposed"
+        assert row.version == 1 and row.status == "approved"
+        children = db.query(Task).filter(Task.parent_id == anchor_id).order_by(Task.id).all()
+        assert [c.title for c in children] == ["Investigate", "Summarise"]
+        assert all(c.status == "pending" for c in children)
+        from app.models import Approval
+        approval = db.query(Approval).filter(Approval.plan_id == row.id).one()
+        assert approval.decided_by == "office-leader"
     assert "plan_proposed" in events_for(conv_db, anchor_id)
+    assert "plan_approved" in events_for(conv_db, anchor_id)
+    # the leader briefed the crew: one instruction per step, addressed to its owner
+    assert "agent_chat" in events_for(conv_db, anchor_id)
 
 
 def test_proposal_message_carries_full_plan_details(conv_db):
@@ -190,9 +199,9 @@ def test_proposal_message_carries_full_plan_details(conv_db):
     assert "0. Investigate" in content and "Researcher" in content   # owner role
     assert "Depends on: nothing" in content                  # order/dependency
     assert "1. Summarise" in content and "Depends on: #0" in content
-    assert "Accept: notes captured" in content               # per-step criteria
+    assert "Accept: notes captured"                   # per-step criteria
     assert "Overall acceptance criteria:" in content and "summary delivered" in content
-    assert "Approve version 1" in content                    # approval version, web channel
+    assert "Work starts automatically" in content             # no manual gate, web channel
 
 
 def test_telegram_proposal_is_queued_in_full_with_stable_order(conv_db):
@@ -209,7 +218,7 @@ def test_telegram_proposal_is_queued_in_full_with_stable_order(conv_db):
     joined = "\n".join(r.text for r in rows)
     assert "Proposal v1" in joined
     assert "Depends on: #0" in joined
-    assert "/approve 1" in joined                            # telegram reply path
+    assert "/revise <notes>" in joined                       # work starts, revision is the lever
     assert all(r.dedupe_key.startswith("assistant-") for r in rows)
     order = [int(r.dedupe_key.rsplit(":", 1)[1]) for r in rows]
     assert order == sorted(order)                            # chunks keep their sequence

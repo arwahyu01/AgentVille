@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
-import type { Agent, Conversation, Task, TaskEvent, TeamEvent } from './types'
+import type { Agent, Conversation, StreamEvent, Task, TaskEvent, TeamEvent } from './types'
 
 vi.mock('./features/office/OfficeScene', () => ({
   default: () => <div data-testid="office-scene" />,
@@ -15,7 +15,13 @@ const agents: Agent[] = [
 const tasks: Task[] = [
   { id: 10, title: 'Prepare sprint report', description: 'Summarise progress', status: 'running', priority: 'high', agent_id: 2, parent_id: null, run_mode: 'manual', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T02:00:00Z' },
   { id: 11, title: 'Draft release notes', description: '', status: 'pending', priority: 'normal', agent_id: null, parent_id: null, run_mode: 'manual', artifact_path: '', created_at: '2026-10-24T01:30:00Z', updated_at: '2026-10-24T01:30:00Z' },
-  { id: 12, title: 'AI finished job', description: '', status: 'completed', priority: 'normal', agent_id: 1, parent_id: null, run_mode: 'ai', artifact_path: 'data/artifacts/task-12.md', created_at: '2026-10-24T01:30:00Z', updated_at: '2026-10-24T02:30:00Z' },
+  { id: 12, title: 'AI finished job', description: '', status: 'completed', priority: 'normal', agent_id: 2, parent_id: null, run_mode: 'manual', artifact_path: 'data/artifacts/task-12.md', created_at: '2026-10-24T00:00:00Z', updated_at: '2026-10-24T03:00:00Z' },
+  { id: 20, title: 'Weekly numbers report', description: '', status: 'running', priority: 'normal', agent_id: 2, parent_id: null, conversation_id: 7, run_mode: 'conversation', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T02:00:00Z', plan_step_index: null },
+  { id: 21, title: 'Need a plan', description: '', status: 'clarifying', priority: 'normal', agent_id: 1, parent_id: null, conversation_id: 8, run_mode: 'conversation', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T01:00:00Z', plan_step_index: null },
+  { id: 22, title: 'Investigate', description: '', status: 'completed', priority: 'normal', agent_id: 2, parent_id: 20, run_mode: 'conversation', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T02:00:00Z', plan_step_index: 0 },
+  { id: 23, title: 'Summarise', description: '', status: 'running', priority: 'normal', agent_id: 2, parent_id: 20, run_mode: 'conversation', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T02:00:00Z', plan_step_index: 1 },
+  { id: 30, title: 'Brand poster', description: '', status: 'completed', priority: 'normal', agent_id: 2, parent_id: null, run_mode: 'manual', artifact_path: '', created_at: '2026-10-23T00:00:00Z', updated_at: '2026-10-24T04:00:00Z' },
+  { id: 31, title: 'Promo clip', description: '', status: 'completed', priority: 'normal', agent_id: 2, parent_id: null, run_mode: 'manual', artifact_path: '', created_at: '2026-10-23T00:00:00Z', updated_at: '2026-10-24T05:00:00Z' },
 ]
 
 const events: TaskEvent[] = [
@@ -28,20 +34,9 @@ const teamEvents: TeamEvent[] = [
 ]
 
 const conversations: Conversation[] = [
-  { id: 7, channel: 'web', user_identity: 'local', title: 'Weekly numbers report', anchor_task_id: 20, current_plan_version: 1, status: 'awaiting_approval', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T02:00:00Z' },
+  { id: 7, channel: 'web', user_identity: 'local', title: 'Weekly numbers report', anchor_task_id: 20, current_plan_version: 1, status: 'running', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T02:00:00Z' },
   { id: 8, channel: 'web', user_identity: 'local', title: 'Need a plan', anchor_task_id: 21, current_plan_version: 0, status: 'clarifying', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T01:00:00Z' },
 ]
-
-const planInfo = {
-  current: {
-    id: 3, conversation_id: 7, version: 1, status: 'proposed', summary: 'two steps', created_at: '2026-10-24T02:00:00Z',
-    steps: [
-      { title: 'Investigate', instruction: 'dig in', agent_role: 'Researcher', depends_on: [], required: true, acceptance_criteria: ['notes'], uses_tools: false },
-      { title: 'Summarise', instruction: 'write it', agent_role: 'Administrator', depends_on: [0], required: true, acceptance_criteria: [], uses_tools: false },
-    ],
-  },
-  history: [],
-}
 
 const aiConfig = {
   ai_enabled: false, ai_model: 'opencode/big-pickle', ai_timeout_s: 300,
@@ -66,102 +61,205 @@ class FakeEventSource {
   }
 }
 
+function queueRow(title: string): HTMLElement {
+  return within(screen.getByTestId('run-list')).getByText(title)
+}
+
 let aiEnabled = false
+let approveRequests: string[] = []
+let failedRun: Task | null = null
 
 function jsonResponse(data: unknown) {
   return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } })
 }
 
+const previews: Record<number, unknown> = {
+  12: { kind: 'web', entry: 'landing/index.html', url: '/api/tasks/12/preview/landing/index.html', size: 1200, files: [] },
+  30: { kind: 'image', entry: 'poster.png', url: '/api/tasks/30/preview/poster.png', size: 9000, files: [] },
+  31: { kind: 'video', entry: 'promo.mp4', url: '/api/tasks/31/preview/promo.mp4', size: 900000, files: [] },
+}
+
+function taskById(id: number): Task {
+  return tasks.find((task) => task.id === id) ?? tasks[0]
+}
+
 beforeEach(() => {
   cleanup()
   aiEnabled = false
+  approveRequests = []
+  failedRun = null
   FakeEventSource.instances = []
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method ?? 'GET'
+    if (url.includes('/approve')) approveRequests.push(url)
     if (method === 'POST' && /\/api\/conversations\/\d+\/(approve|revise|cancel|messages)$/.test(url)) {
       return jsonResponse({ ok: true, url })
+    }
+    if (method === 'POST' && /\/api\/tasks\/(clear|\d+\/(stop|reassign|qc-rerun|execute))$/.test(url)) {
+      return jsonResponse({ stopped: [20], count: 1 })
     }
     if (url.includes('/api/events/team')) return jsonResponse(teamEvents)
     if (url.includes('/events') && !url.includes('/stream')) return jsonResponse(events)
     if (url.endsWith('/api/agents')) return jsonResponse(agents)
-    if (url.endsWith('/api/tasks')) return jsonResponse(tasks)
+    if (url.endsWith('/api/tasks')) return jsonResponse(failedRun ? [...tasks, failedRun] : tasks)
     if (url.endsWith('/api/conversations')) return jsonResponse(conversations)
     if (/\/api\/conversations\/\d+\/messages$/.test(url)) return jsonResponse([{ id: 1, conversation_id: 7, role: 'user', content: 'make the report', channel: 'web', created_at: '2026-10-24T01:00:00Z' }])
-    if (/\/api\/conversations\/\d+\/plan$/.test(url)) return jsonResponse(url.includes('/7') ? planInfo : { current: null, history: [] })
+    if (/\/api\/conversations\/\d+\/plan$/.test(url)) return jsonResponse({ current: null, history: [] })
     if (url.endsWith('/api/channels/status')) return jsonResponse({ telegram: { configured: false, reason: 'TELEGRAM_BOT_TOKEN is not set', running: false, allowed_chats: 0 } })
     if (url.endsWith('/api/ai/config')) return jsonResponse({ ...aiConfig, ai_enabled: aiEnabled })
     if (url.includes('/api/ai/models')) return jsonResponse({ models: ['opencode/big-pickle', 'opencode/glm-5.3-flash-free'] })
-    if (url.endsWith('/result')) return jsonResponse({ ...tasks[2], result: 'THE FINAL ANSWER', children: [{ ...tasks[2], id: 13, title: 'sub step', parent_id: 12, provider_used: 'qoder', model_used: 'Efficient' }], plan_steps: [], qc_reviews: [], diff_path: '' })
-    if (url.endsWith('/execute')) return jsonResponse({ ...tasks[1], status: 'queued', run_mode: 'ai' })
+    const result = /\/api\/tasks\/(\d+)\/result$/.exec(url)
+    if (result) {
+      const id = Number(result[1])
+      const task = taskById(id)
+      return jsonResponse({
+        ...task,
+        result: id === 12 ? 'THE FINAL ANSWER' : '',
+        children: id === 12 ? [{ ...task, id: 13, title: 'sub step', parent_id: 12 }] : [],
+        plan_steps: [], qc_reviews: [], diff_path: '',
+        preview: previews[id] ?? { kind: 'none', entry: '', url: '', size: 0, files: [] },
+      })
+    }
     return new Response('{"detail":"Not Found"}', { status: 404 })
   }))
 })
 
-describe('App', () => {
-  it('renders office and live backend data', async () => {
+describe('one-page office', () => {
+  it('renders the office, the queue and the API state on a single page', async () => {
     render(<App />)
     expect(screen.getByTestId('office-scene')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText('API Connected')).toBeInTheDocument())
-    expect(screen.getByText('Prepare sprint report')).toBeInTheDocument()
-    expect(screen.getByText('Draft release notes')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Terhubung/)).toBeInTheDocument())
+    expect(screen.getByTestId('run-list')).toBeInTheDocument()
+    expect(queueRow('Prepare sprint report')).toBeInTheDocument()
+    expect(queueRow('Draft release notes')).toBeInTheDocument()
+    expect(screen.getByTestId('result-stage')).toBeInTheDocument()
+    // The old sidebar navigation is gone — one page only.
+    expect(screen.queryByRole('button', { name: /^tasks$/i })).not.toBeInTheDocument()
   })
 
-  it('shows task detail with activity history when a task is clicked', async () => {
+  it('shows delivery progress for a run that has delegated steps', async () => {
     render(<App />)
-    await waitFor(() => screen.getByText('Prepare sprint report'))
-    fireEvent.click(screen.getByText('Prepare sprint report'))
-    expect(screen.getByText('Task details')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText('Status changed: queued -> running')).toBeInTheDocument())
-    expect(screen.getByText('Activity history')).toBeInTheDocument()
+    await waitFor(() => queueRow('Weekly numbers report'))
+    const row = queueRow('Weekly numbers report').closest('li')!
+    expect(within(row).getByText(/1\/2 langkah/)).toBeInTheDocument()
+    expect(within(row).getByText(/#20 · Byte/)).toBeInTheDocument()
   })
 
-  it('validates the create form with zod before calling the API', async () => {
+  it('puts the built website on screen when a finished job is selected', async () => {
     render(<App />)
-    await waitFor(() => screen.getByText('API Connected'))
-    fireEvent.click(screen.getByRole('button', { name: /new task/i }))
-    fireEvent.click(await screen.findByRole('button', { name: /create task/i }))
-    expect(await screen.findByText('Title is required')).toBeInTheDocument()
-    const postCalls = vi.mocked(fetch).mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'POST')
-    expect(postCalls).toHaveLength(0)
+    await waitFor(() => queueRow('AI finished job'))
+    fireEvent.click(queueRow('AI finished job'))
+    const stage = screen.getByTestId('result-stage')
+    const frame = await within(stage).findByTitle('Hasil: AI finished job')
+    expect(frame).toHaveAttribute('src', expect.stringContaining('/api/tasks/12/preview/landing/index.html'))
+    expect(within(stage).getByText('WEB')).toBeInTheDocument()
+    expect(within(stage).getByText(/landing\/index\.html/)).toBeInTheDocument()
   })
 
-  it('filters tasks by status', async () => {
+  it('shows a produced image instead of a log', async () => {
     render(<App />)
-    await waitFor(() => screen.getByText('Draft release notes'))
-    fireEvent.change(screen.getByLabelText('Filter task status'), { target: { value: 'running' } })
-    expect(screen.getByText('Prepare sprint report')).toBeInTheDocument()
-    expect(screen.queryByText('Draft release notes')).not.toBeInTheDocument()
+    await waitFor(() => queueRow('Brand poster'))
+    fireEvent.click(queueRow('Brand poster'))
+    const stage = screen.getByTestId('result-stage')
+    const image = await within(stage).findByAltText('Hasil: Brand poster')
+    expect(image).toHaveAttribute('src', expect.stringContaining('/api/tasks/30/preview/poster.png'))
+    expect(within(stage).getByText('GAMBAR')).toBeInTheDocument()
+  })
+
+  it('plays a produced video and links to it', async () => {
+    render(<App />)
+    await waitFor(() => queueRow('Promo clip'))
+    fireEvent.click(queueRow('Promo clip'))
+    const stage = screen.getByTestId('result-stage')
+    const video = await within(stage).findByText(/Buka video/)
+    expect(video).toHaveAttribute('href', expect.stringContaining('/api/tasks/31/preview/promo.mp4'))
+    expect(stage.querySelector('video')).toHaveAttribute('src', expect.stringContaining('/api/tasks/31/preview/promo.mp4'))
+  })
+
+  it('shows progress while the crew is still working', async () => {
+    render(<App />)
+    await waitFor(() => queueRow('Prepare sprint report'))
+    fireEvent.click(queueRow('Prepare sprint report'))
+    const stage = screen.getByTestId('result-stage')
+    expect(await within(stage).findByText(/Kru sedang mengerjakan/)).toBeInTheDocument()
+  })
+
+  it('clears active tasks without touching history', async () => {
+    render(<App />)
+    await waitFor(() => screen.getByRole('button', { name: /Bersihkan antrean/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Bersihkan antrean/i }))
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find((c) => String(c[0]).endsWith('/api/tasks/clear'))
+      expect(call).toBeDefined()
+      expect((call![1] as RequestInit).method).toBe('POST')
+    })
+  })
+
+  it('stops only what is running', async () => {
+    render(<App />)
+    await waitFor(() => screen.getByRole('button', { name: /^Stop$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Stop$/i }))
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter((c) => /\/api\/tasks\/\d+\/stop$/.test(String(c[0])))
+      expect(calls.length).toBeGreaterThan(0)
+    })
+    // pending work is never addressed by stop
+    expect(vi.mocked(fetch).mock.calls.some((c) => String(c[0]).endsWith('/api/tasks/11/stop'))).toBe(false)
   })
 
   it('shows the Team Conversation panel with persisted journal messages', async () => {
     render(<App />)
     const panel = await screen.findByTestId('team-conversation')
-    expect(screen.getByText('Team Conversation')).toBeInTheDocument()
+    expect(screen.getByText('Percakapan Tim')).toBeInTheDocument()
     await within(panel).findByText('Byte started on step 1')
     expect(within(panel).getByText('Byte')).toBeInTheDocument()
     expect(within(panel).getByText('Developer')).toBeInTheDocument()
     expect(within(panel).getByText('Q4 numbers rundown')).toBeInTheDocument()
-    expect(within(panel).getByText('step 0')).toBeInTheDocument()
+    expect(within(panel).getByText('langkah 0')).toBeInTheDocument()
   })
 
-  it('appends live task events to the Team Conversation panel', async () => {
+  it('appends live task events and links speakers to recipients', async () => {
     render(<App />)
     const panel = await screen.findByTestId('team-conversation')
-    // agents/tasks must be loaded before the frame arrives, or the name lookup misses
     await within(panel).findByText('Byte started on step 1')
     FakeEventSource.instances[0].emit('task_event', JSON.stringify({
-      id: 55, taskId: 10, type: 'step_completed', message: 'Coordinator drafted the outline',
+      id: 55, taskId: 10, type: 'agent_chat', message: 'Coordinator drafted the outline',
       conversationId: null, agentId: 1, provider: null, model: null, stepIndex: 2, createdAt: '2026-10-24T03:00:00Z',
+      actorAgentId: 1, recipientAgentId: 2,
     }))
     expect(await within(panel).findByText('Coordinator drafted the outline')).toBeInTheDocument()
     expect(within(panel).getByText('Atlas')).toBeInTheDocument()
-    expect(within(panel).getByText('AI Coordinator')).toBeInTheDocument()
-    expect(within(panel).getByText('step 2')).toBeInTheDocument()
+    expect(within(panel).getByText(/→ Byte/)).toBeInTheDocument()
   })
 
-  it('renders the AI engine bar and patches config when toggled', async () => {
+  it('flags escalations from specialists to the leader', async () => {
+    render(<App />)
+    const panel = await screen.findByTestId('team-conversation')
+    await within(panel).findByText('Byte started on step 1')
+    FakeEventSource.instances[0].emit('task_event', JSON.stringify({
+      id: 56, taskId: 10, type: 'needs_help', message: 'Blocked: the data source is missing',
+      conversationId: null, agentId: 2, provider: null, model: null, stepIndex: 1, createdAt: '2026-10-24T03:10:00Z',
+    }))
+    expect(await within(panel).findByText(/1 eskalasi/)).toBeInTheDocument()
+  })
+
+  it('hides the approval panel while everything runs automatically', async () => {
+    render(<App />)
+    await waitFor(() => screen.getByText(/Terhubung/))
+    expect(screen.queryByTestId('approvals')).not.toBeInTheDocument()
+  })
+
+  it('lists a genuinely blocked run in the approvals panel', async () => {
+    failedRun = { id: 40, title: 'Broken build', description: '', status: 'failed', priority: 'normal', agent_id: 2, parent_id: null, run_mode: 'conversation', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T04:00:00Z' }
+    render(<App />)
+    const panel = await screen.findByTestId('approvals')
+    expect(within(panel).getByText('Broken build')).toBeInTheDocument()
+    expect(within(panel).getByText(/pimpinan minta arahan/)).toBeInTheDocument()
+  })
+
+  it('renders the AI engine bar in the collapsible settings and patches config', async () => {
     render(<App />)
     await waitFor(() => screen.getByText('AI Engine'))
     fireEvent.click(screen.getByRole('checkbox', { name: 'AI enabled' }))
@@ -171,129 +269,66 @@ describe('App', () => {
       expect(call).toBeDefined()
     })
   })
-
-  it('shows AI run buttons when the engine is enabled and posts to /execute', async () => {
-    aiEnabled = true
-    render(<App />)
-    await waitFor(() => screen.getByLabelText('AI model'))
-    fireEvent.click(screen.getByText('Draft release notes'))
-    fireEvent.click(await screen.findByRole('button', { name: /run with ai/i }))
-    await waitFor(() => {
-      const call = vi.mocked(fetch).mock.calls.find((c) => String(c[0]).endsWith('/api/tasks/11/execute'))
-      expect(call).toBeDefined()
-      expect((call![1] as RequestInit).method).toBe('POST')
-      expect((call![1] as RequestInit).body).toContain('direct')
-    })
-  })
-
-  it('hides AI run buttons while the engine is off', async () => {
-    render(<App />)
-    await waitFor(() => screen.getByText('AI Engine'))
-    fireEvent.click(screen.getByText('Draft release notes'))
-    await waitFor(() => screen.getByText('Task details'))
-    expect(screen.queryByRole('button', { name: /run with ai/i })).not.toBeInTheDocument()
-  })
-
-  it('opens the AI result modal with subtasks and output', async () => {
-    render(<App />)
-    await waitFor(() => screen.getByText('AI finished job'))
-    fireEvent.click(screen.getByText('AI finished job'))
-    fireEvent.click(await screen.findByRole('button', { name: /open result/i }))
-    expect(await screen.findByText('THE FINAL ANSWER')).toBeInTheDocument()
-    expect(screen.getByText('sub step')).toBeInTheDocument()
-    expect(screen.getByText(/data\/artifacts\/task-12\.md/)).toBeInTheDocument()
-  })
-
-  it('names the provider and model that actually ran each subtask', async () => {
-    render(<App />)
-    await waitFor(() => screen.getByText('AI finished job'))
-    fireEvent.click(screen.getByText('AI finished job'))
-    fireEvent.click(await screen.findByRole('button', { name: /open result/i }))
-    expect(await screen.findByText('sub step')).toBeInTheDocument()
-    expect(screen.getByText('qoder')).toBeInTheDocument()
-    expect(screen.getByText('Efficient')).toBeInTheDocument()
-  })
 })
 
-describe('Requests view', () => {
-  async function openRequests() {
+describe('conversations on the same page', () => {
+  it('shows the chat transcript under the result', async () => {
     render(<App />)
-    await waitFor(() => screen.getByText('API Connected'))
-    fireEvent.click(screen.getByRole('button', { name: /requests/i }))
-    await waitFor(() => expect(screen.getByTestId('chat-panel')).toBeInTheDocument())
-  }
-
-  it('lists conversations and shows the chat transcript', async () => {
-    await openRequests()
-    expect(screen.getByText('Weekly numbers report')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Weekly numbers report'))
+    await waitFor(() => screen.getByText(/Terhubung/))
+    fireEvent.change(screen.getByLabelText('Pilih percakapan'), { target: { value: '7' } })
     expect(await screen.findByText('make the report')).toBeInTheDocument()
-    expect(screen.getByText(/two steps/)).toBeInTheDocument()
-  })
-
-  it('gates approval on the awaiting_approval state', async () => {
-    await openRequests()
-    fireEvent.click(screen.getByText('Weekly numbers report'))
-    const approve = await screen.findByRole('button', { name: /approve v1/i })
-    expect(approve).toBeEnabled()
-    fireEvent.click(approve)
-    await waitFor(() => {
-      const call = vi.mocked(fetch).mock.calls.find((c) => String(c[0]).endsWith('/api/conversations/7/approve'))
-      expect(call).toBeDefined()
-      expect((call![1] as RequestInit).body).toContain('plan_version')
-    })
-    fireEvent.click(screen.getByText('Need a plan'))
-    await waitFor(() => expect(screen.queryByRole('button', { name: /approve v1/i })).not.toBeInTheDocument())
-    expect(screen.getByText(/Coordinator is still clarifying/)).toBeInTheDocument()
   })
 
   it('sends chat messages only while clarifying', async () => {
-    await openRequests()
-    fireEvent.click(screen.getByText('Need a plan'))
+    render(<App />)
+    await waitFor(() => screen.getByText(/Terhubung/))
+    fireEvent.change(screen.getByLabelText('Pilih percakapan'), { target: { value: '8' } })
     const input = await screen.findByLabelText('Message')
-    expect(input).toBeEnabled()
+    await waitFor(() => expect(input).toBeEnabled())
     fireEvent.change(input, { target: { value: 'revenue figures please' } })
-    fireEvent.click(screen.getByRole('button', { name: /send/i }))
+    fireEvent.click(within(input.closest('form')! as HTMLElement).getByRole('button', { name: /kirim/i }))
     await waitFor(() => {
       const call = vi.mocked(fetch).mock.calls.find((c) =>
         String(c[0]).endsWith('/api/conversations/8/messages') && (c[1] as RequestInit | undefined)?.method === 'POST')
       expect(call).toBeDefined()
       expect((call![1] as RequestInit).body).toContain('revenue figures please')
     })
-    fireEvent.click(screen.getByText('Weekly numbers report'))
+    fireEvent.change(screen.getByLabelText('Pilih percakapan'), { target: { value: '7' } })
     await waitFor(() => expect(screen.getByLabelText('Message')).toBeDisabled())
   })
 
-  it('surfaces the telegram configuration state', async () => {
-    await openRequests()
-    expect(await screen.findByText(/Telegram channel not active/)).toBeInTheDocument()
+  it('gives the office an order from the command bar', async () => {
+    render(<App />)
+    const input = await screen.findByLabelText('Perintah untuk kantor')
+    fireEvent.change(input, { target: { value: 'Build a landing page' } })
+    fireEvent.click(within(input.closest('form')! as HTMLElement).getByRole('button', { name: /kerjakan/i }))
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find((c) =>
+        String(c[0]).endsWith('/api/conversations') && (c[1] as RequestInit | undefined)?.method === 'POST')
+      expect(call).toBeDefined()
+      expect((call![1] as RequestInit).body).toContain('Build a landing page')
+    })
   })
+})
 
+describe('journal', () => {
   it('appends realtime journal frames from the event stream', async () => {
-    await openRequests()
+    render(<App />)
     const source = FakeEventSource.instances[0]
     expect(source.url).toContain('/api/events/stream')
     source.emit('open')
-    expect(await screen.findByText(/journal streaming/)).toBeInTheDocument()
+    expect(await screen.findByText(/Terhubung · live/)).toBeInTheDocument()
     source.emit('task_event', JSON.stringify({
       id: 99, taskId: 10, type: 'step_completed', message: 'Step 0 done in 1.2s',
       conversationId: null, agentId: 2, provider: 'qoder', model: 'Efficient', stepIndex: 0, createdAt: '2026-10-24T03:00:00Z',
     }))
-    expect(await screen.findByText('Step 0 done in 1.2s')).toBeInTheDocument()
-    expect(screen.getByText('qoder')).toBeInTheDocument()
-    expect(screen.getByText('Efficient')).toBeInTheDocument()
-    expect(screen.getByText('step 0')).toBeInTheDocument()
-  })
-
-  it('renders office simulation frames on the same stream', async () => {
-    await openRequests()
-    const source = FakeEventSource.instances[0]
-    source.emit('office_event', JSON.stringify({
-      id: 3, kind: undefined, type: 'patrol_checkpoint_reached', message: 'Sentra reached the lobby checkpoint',
-      actorAgentId: 14, actorName: 'Sentra', fromRoom: null, toRoom: 'lobby', area: 'lobby',
-      status: 'working', createdAt: '2026-10-24T03:05:00Z',
-    }))
-    expect(await screen.findByText('Sentra reached the lobby checkpoint')).toBeInTheDocument()
-    expect(screen.getByText('patrol_checkpoint_reached')).toBeInTheDocument()
+    const panel = screen.getByTestId('team-conversation')
+    expect(await within(panel).findByText('Step 0 done in 1.2s')).toBeInTheDocument()
+    expect(within(panel).getByText('qoder')).toBeInTheDocument()
+    expect(within(panel).getByText('Efficient')).toBeInTheDocument()
   })
 })
+
+// Keeps the unused-import shape honest: the stream payload type is what the app validates.
+const _streamShape: StreamEvent = { id: 1, kind: 'task', taskId: 1, type: 'created', message: '', conversationId: null, agentId: null, provider: null, model: null, stepIndex: null, createdAt: null }
+void _streamShape

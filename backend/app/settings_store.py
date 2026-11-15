@@ -69,6 +69,11 @@ def max_concurrency(db: Session) -> int:
     return _int_setting(db, "max_concurrency", 3, 1, 16)
 
 
+def max_parallel_jobs(db: Session) -> int:
+    """How many separate requests (jobs) the office runs at the same time."""
+    return _int_setting(db, "max_parallel_jobs", 4, 1, 16)
+
+
 def lease_seconds(db: Session) -> int:
     """A claimed node's lease must be renewed (heartbeat) within this window or another
     worker may take it over after a crash/restart."""
