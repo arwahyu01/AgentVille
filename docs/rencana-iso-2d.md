@@ -348,10 +348,17 @@ Hasil tinjauan dan perbaikan:
       semuanya kembali ke meja setelah 14 detik. Tangkapan: `docs/screenshots/iso2d_briefing_replay.jpg`.
 - [x] Aktivitas lain tetap berfungsi: aksi per alat, serah terima, istirahat, layar penuh.
 
-**Belum dibereskan (butuh persetujuan):** hook Claude Code global masih mengarah ke
-`http://127.0.0.1:8000/api/claude/hooks`, padahal bila port 8000 dipakai proyek lain backend
-AgentVille berjalan di 8001; sesi Claude baru tidak akan muncul sampai hook dialihkan
-(`scripts/claude_hooks.py --remove --apply`, lalu `--url http://127.0.0.1:8001/api/claude/hooks --apply`).
+**Temuan lanjutan (2026-11-15), sudah dibereskan:**
+- [x] Hook Claude Code global dialihkan dari port 8000 ke 8001 (`claude_hooks.py --remove --apply`,
+      lalu `--url http://127.0.0.1:8001/api/claude/hooks --apply`). Diverifikasi dengan kiriman
+      berbentuk asli ke 8001: sesi muncul di `/api/claude/sessions`, lalu data uji dihapus. Hook
+      harus dialihkan lagi bila backend dipindah ke port lain.
+- [x] Tes App yang sempat gagal sekali (`shows a produced image instead of a log`) tidak bisa
+      direproduksi (6 kali penuh dan 3 kali di bawah beban 10 proses CPU, semuanya lolos). Batas
+      tunggu `findBy*`/`waitFor` dinaikkan dari 1 dtk ke 4 dtk di `src/test/setup.ts`; penyebab
+      pastinya tidak terbukti, jadi ini penguatan, bukan perbaikan akar masalah.
+- AI Engine menyala di database lokal (`ai_enabled`); tidak ada task aktif, jadi tidak ada kuota
+  yang terpakai. Keputusan menyalakan atau mematikannya tetap milik pemilik.
 
 ---
 
