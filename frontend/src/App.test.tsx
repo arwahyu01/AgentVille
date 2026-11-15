@@ -4,7 +4,12 @@ import App from './App'
 import type { Agent, Conversation, StreamEvent, Task, TaskEvent, TeamEvent } from './types'
 
 vi.mock('./features/office/OfficeScene', () => ({
-  default: () => <div data-testid="office-scene" />,
+  default: ({ selectedId, onSelect }: { selectedId: number | null; onSelect: (id: number | null) => void }) => (
+    <div data-testid="office-scene" data-selected={selectedId ?? ''}>
+      <button onClick={() => onSelect(2)}>pilih agen</button>
+      <button onClick={() => onSelect(null)}>tutup dialog</button>
+    </div>
+  ),
 }))
 
 const agents: Agent[] = [
@@ -137,6 +142,15 @@ describe('one-page office', () => {
     expect(screen.getByTestId('result-stage')).toBeInTheDocument()
     // The old sidebar navigation is gone — one page only.
     expect(screen.queryByRole('button', { name: /^tasks$/i })).not.toBeInTheDocument()
+  })
+
+  it('opens and closes an agent dialog from the office scene', async () => {
+    render(<App />)
+    const scene = await screen.findByTestId('office-scene')
+    fireEvent.click(within(scene).getByText('pilih agen'))
+    expect(scene).toHaveAttribute('data-selected', '2')
+    fireEvent.click(within(scene).getByText('tutup dialog'))
+    expect(scene).toHaveAttribute('data-selected', '')
   })
 
   it('shows delivery progress for a run that has delegated steps', async () => {

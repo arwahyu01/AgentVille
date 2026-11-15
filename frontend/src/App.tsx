@@ -30,6 +30,7 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [selectedTask, setSelectedTask] = useState<number | null>(null)
+  const [selectedAgent, setSelectedAgent] = useState<number | null>(null)
   const [selectedConversation, setSelectedConversation] = useState<number | null>(null)
   const [result, setResult] = useState<TaskResult | null>(null)
   const [resultLoading, setResultLoading] = useState(false)
@@ -258,7 +259,7 @@ export default function App() {
             })}
           </ul>
           <div className="queue-office">
-            <OfficeScene agents={agents} tasks={tasks} selectedId={selectedTask} onSelect={() => {}}
+            <OfficeScene agents={agents} tasks={tasks} selectedId={selectedAgent} onSelect={setSelectedAgent}
                         activity={agentActivity} errands={errands} meetingTopic={meetingTopic} />
           </div>
         </aside>
