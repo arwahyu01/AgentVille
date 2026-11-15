@@ -254,10 +254,14 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
     onPointerCancel: () => setPad(key, false),
   })
 
-  const rendererSwitch = (
+  // Explore only exists in the 3D scene, so the 2D renderer gets an explicit door to it instead of
+  // hiding the feature behind a renderer toggle nobody would guess.
+  const goExplore = () => { setRenderer('3d'); switchMode('explore') }
+  const rendererSwitch = (withExplore = false) => (
     <div className="renderer-switch" role="group" aria-label="Renderer">
       <button type="button" className={renderer === '2d' ? 'active' : ''} onClick={() => setRenderer('2d')}>2D</button>
       <button type="button" className={renderer === '3d' ? 'active' : ''} onClick={() => setRenderer('3d')}>3D</button>
+      {withExplore && <button type="button" onClick={goExplore}>Explore</button>}
       <button
         type="button" className="fs" onClick={fullscreen.toggle}
         aria-pressed={fullscreen.active}
@@ -308,7 +312,7 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
             qa={qa}
           />
         </Suspense>
-        {rendererSwitch}
+        {rendererSwitch(true)}
         {dialogs}
       </div>
     )
@@ -316,7 +320,7 @@ export default function OfficeScene({ agents, tasks, selectedId, onSelect, activ
 
   return (
     <div ref={boxRef} className={`office-canvas ${mode}${selected || staffTalk ? ' has-dialog' : ''}${fullscreen.overlay ? ' expanded' : ''}`} id="office-canvas" data-mode={mode} data-qa={qa ? '1' : '0'} data-fullscreen={fullscreen.active ? '1' : '0'}>
-      {rendererSwitch}
+      {rendererSwitch()}
       <Canvas
         shadows
         dpr={quality === 'high' ? [1, 1.8] : [1, 1.2]}

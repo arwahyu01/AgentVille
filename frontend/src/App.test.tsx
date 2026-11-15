@@ -139,7 +139,9 @@ describe('one-page office', () => {
     expect(screen.getByTestId('run-list')).toBeInTheDocument()
     expect(queueRow('Prepare sprint report')).toBeInTheDocument()
     expect(queueRow('Draft release notes')).toBeInTheDocument()
-    expect(screen.getByTestId('result-stage')).toBeInTheDocument()
+    // The floor is the page; results open over it only when there is something to show.
+    expect(screen.getByRole('heading', { name: /^Kantor$/ })).toBeInTheDocument()
+    expect(screen.queryByTestId('result-stage')).not.toBeInTheDocument()
     // The old sidebar navigation is gone — one page only.
     expect(screen.queryByRole('button', { name: /^tasks$/i })).not.toBeInTheDocument()
   })
@@ -172,6 +174,17 @@ describe('one-page office', () => {
     expect(within(stage).getByText(/landing\/index\.html/)).toBeInTheDocument()
   })
 
+  it('closes the big result modal and leaves the office in place', async () => {
+    render(<App />)
+    await waitFor(() => queueRow('AI finished job'))
+    fireEvent.click(queueRow('AI finished job'))
+    const stage = await screen.findByTestId('result-stage')
+    expect(screen.getByRole('dialog', { name: /Hasil: AI finished job/ })).toBeInTheDocument()
+    fireEvent.click(within(stage.closest('.result-modal')! as HTMLElement).getByRole('button', { name: /Tutup hasil/i }))
+    await waitFor(() => expect(screen.queryByTestId('result-stage')).not.toBeInTheDocument())
+    expect(screen.getByTestId('office-scene')).toBeInTheDocument()
+  })
+
   it('shows a produced image instead of a log', async () => {
     render(<App />)
     await waitFor(() => queueRow('Brand poster'))
@@ -192,12 +205,13 @@ describe('one-page office', () => {
     expect(stage.querySelector('video')).toHaveAttribute('src', expect.stringContaining('/api/tasks/31/preview/promo.mp4'))
   })
 
-  it('shows progress while the crew is still working', async () => {
+  it('keeps the office in view while the crew is still working', async () => {
     render(<App />)
     await waitFor(() => queueRow('Prepare sprint report'))
     fireEvent.click(queueRow('Prepare sprint report'))
-    const stage = screen.getByTestId('result-stage')
-    expect(await within(stage).findByText(/Kru sedang mengerjakan/)).toBeInTheDocument()
+    const row = queueRow('Prepare sprint report').closest('li')!
+    expect(within(row).getByText('Dikerjakan')).toBeInTheDocument()
+    expect(screen.queryByTestId('result-stage')).not.toBeInTheDocument()
   })
 
   it('clears active tasks without touching history', async () => {

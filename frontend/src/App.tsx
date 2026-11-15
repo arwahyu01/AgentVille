@@ -34,6 +34,8 @@ export default function App() {
   const [selectedConversation, setSelectedConversation] = useState<number | null>(null)
   const [result, setResult] = useState<TaskResult | null>(null)
   const [resultLoading, setResultLoading] = useState(false)
+  const [resultOpen, setResultOpen] = useState(false)
+  const autoOpened = useRef<string | null>(null)
   const [newRequest, setNewRequest] = useState('')
   const [busy, setBusy] = useState(false)
   const [apiOnline, setApiOnline] = useState(false)
@@ -152,6 +154,30 @@ export default function App() {
     return () => { cancelled = true }
   }, [selectedTask, selectedTaskData?.updated_at, connected])
 
+  // A finished deliverable is the whole point, so it opens itself in a big modal once per result.
+  // Closing it stays closed until the task produces a new version.
+  useEffect(() => {
+    if (!result || !selectedTaskData) return
+    if ((result.preview?.kind ?? 'none') === 'none') return
+    const key = `${selectedTaskData.id}:${selectedTaskData.updated_at}`
+    if (autoOpened.current === key) return
+    autoOpened.current = key
+    setResultOpen(true)
+  }, [result, selectedTaskData])
+
+  // Closing counts as "seen": a result that arrives afterwards must not pop the modal back open.
+  function closeResult() {
+    if (selectedTaskData) autoOpened.current = `${selectedTaskData.id}:${selectedTaskData.updated_at}`
+    setResultOpen(false)
+  }
+
+  useEffect(() => {
+    if (!resultOpen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeResult() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
   async function startRequest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!newRequest.trim()) return
@@ -193,8 +219,14 @@ export default function App() {
   }
 
   function selectRun(task: Task) {
+    if (task.id !== selectedTask) setResult(null)
     setSelectedTask(task.id)
     if (task.conversation_id != null) setSelectedConversation(task.conversation_id)
+    // Picking a finished job is a request to look at what it made.
+    if (task.status === 'completed') {
+      autoOpened.current = null
+      setResultOpen(true)
+    }
   }
 
   return (
@@ -258,14 +290,23 @@ export default function App() {
               )
             })}
           </ul>
-          <div className="queue-office">
-            <OfficeScene agents={agents} tasks={tasks} selectedId={selectedAgent} onSelect={setSelectedAgent}
-                        activity={agentActivity} errands={errands} meetingTopic={meetingTopic} />
-          </div>
         </aside>
 
-        <div className="col-stage">
-          <ResultStage task={selectedTaskData} result={result} agents={agents} loading={resultLoading && result == null} />
+        <div className="col-office">
+          <section className="panel office-stage">
+            <div className="office-stage-head">
+              <div>
+                <h2><Activity size={15} /> Kantor</h2>
+                <p>{agents.length} staf · {activeCount} bekerja · {completedCount} selesai</p>
+              </div>
+              <button className="secondary-button compact" disabled={result == null}
+                      onClick={() => setResultOpen(true)}>
+                <FileText size={13} /> Lihat hasil
+              </button>
+            </div>
+            <OfficeScene agents={agents} tasks={tasks} selectedId={selectedAgent} onSelect={setSelectedAgent}
+                        activity={agentActivity} errands={errands} meetingTopic={meetingTopic} />
+          </section>
         </div>
 
         <aside className="col-rail">
@@ -298,6 +339,23 @@ export default function App() {
           </details>
         </aside>
       </div>
+
+      {resultOpen && selectedTaskData && (
+        <div className="result-modal-backdrop"
+             onClick={(e) => { if (e.target === e.currentTarget) closeResult() }}>
+          <div className="result-modal" role="dialog" aria-modal="true" aria-label={`Hasil: ${selectedTaskData.title}`}>
+            <div className="result-modal-bar">
+              <span><Sparkles size={14} /> Hasil pekerjaan</span>
+              <button className="icon-button small" aria-label="Tutup hasil" onClick={closeResult}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="result-modal-body">
+              <ResultStage task={selectedTaskData} result={result} agents={agents} loading={resultLoading && result == null} />
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="app-footer"><span>AGENTVILLE</span><span>Kantor bekerja sendiri · hasil tampil otomatis</span><span>{connected ? 'live' : 'offline'}</span></footer>
     </main>
