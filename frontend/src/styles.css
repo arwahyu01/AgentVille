@@ -364,7 +364,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .stage-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .stage-body { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; background: #0a1017; }
 .stage-body.web, .stage-body.image, .stage-body.video { padding: 0; }
-.stage-body.markdown, .stage-body.text { overflow-y: auto; }
+/* Every text-like result scrolls inside the stage, including kind "none" (a request's combined
+   step results with no previewable artifact), which the stage panel would otherwise clip. */
+.stage-body:not(.web):not(.image):not(.video) { overflow-y: auto; overscroll-behavior: contain; }
 .stage-frame { flex: 1; width: 100%; min-height: 420px; border: 0; background: #fff; display: block; }
 .stage-image { flex: 1; width: 100%; min-height: 300px; max-height: calc(100vh - 250px); object-fit: contain; background: #0a1017; display: block; }
 .stage-video { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 18px; }
