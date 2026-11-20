@@ -1,4 +1,4 @@
-import type { Agent, AiConfig, ChannelStatus, ClaudeSession, CharacterChatReply, CharacterChatTurn, ChatMessage, ClearTasksResult, Conversation, IntegrationAccount, IntegrationProvider, IntegrationStatus, PlanInfo, PlanRead, ProviderName, PublishCredential, PublishJob, PublishStatus, ScheduleStatus, Task, TaskEvent, TaskResult, TeamEvent } from '../types'
+import type { Agent, AiConfig, AuthUser, ChannelStatus, ClaudeSession, CharacterChatReply, CharacterChatTurn, ChatMessage, ClearTasksResult, Conversation, IntegrationAccount, IntegrationProvider, IntegrationStatus, PlanInfo, PlanRead, ProviderName, PublishCredential, PublishJob, PublishStatus, ScheduleStatus, Task, TaskEvent, TaskResult, TeamEvent } from '../types'
 
 // Relative by default so the page keeps working when opened from another device on the LAN;
 // Vite proxies `/api` to the backend. Override with VITE_API_BASE only for split deployments.
@@ -15,9 +15,14 @@ export function clientId(): string {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/api/auth/login') && typeof window !== 'undefined') {
+      // Session expired or revoked while the console was open: drop back to the login page.
+      window.dispatchEvent(new Event('agentville:unauthorized'))
+    }
     const body = await response.json().catch(() => ({}))
     throw new Error(body.detail ?? `Request failed (${response.status})`)
   }
@@ -25,6 +30,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  me: () => request<AuthUser>('/api/auth/me'),
+  login: (username: string, password: string) =>
+    request<AuthUser>('/api/auth/login', {
+      method: 'POST', body: JSON.stringify({ username, password }),
+    }),
+  logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   health: () => request<{ status: string }>('/api/health'),
   agents: () => request<Agent[]>('/api/agents'),
   tasks: () => request<Task[]>('/api/tasks'),
@@ -81,8 +92,9 @@ export const api = {
   integrationVerify: (id: number) => request<IntegrationAccount>(`/api/integrations/${id}/verify`, { method: 'POST' }),
   integrationDisconnect: (id: number) => request<{ ok: boolean }>(`/api/integrations/${id}/disconnect`, { method: 'POST' }),
   publishStatus: () => request<PublishStatus>('/api/publish/status'),
-  publishSaveCredential: (payload: { name: string; api_url: string; token?: string; method?: string; auth_header?: string; auth_scheme?: string; field_map?: Record<string, string>; headers?: Record<string, string>; credential_id?: number | null }) =>
+  publishSaveCredential: (payload: { name: string; cli_project: string; cli_php?: string; field_map?: Record<string, string>; credential_id?: number | null }) =>
     request<PublishCredential>('/api/publish/credentials', { method: 'POST', body: JSON.stringify(payload) }),
+  publishInstallPreset: () => request<PublishCredential>('/api/publish/credentials/preset', { method: 'POST' }),
   publishDeleteCredential: (id: number) => request<{ ok: boolean }>(`/api/publish/credentials/${id}`, { method: 'DELETE' }),
   publishPreview: (payload: { provider: 'dry24' | 'instagram'; article: Record<string, string>; credential_id?: number | null; account_id?: number | null; title?: string }) =>
     request<PublishJob>('/api/publish/preview', { method: 'POST', body: JSON.stringify(payload) }),

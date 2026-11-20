@@ -11,13 +11,13 @@ export default function PublishPanel({ onError }: { onError: (message: string) =
   const [busy, setBusy] = useState(false)
   const [dryPrompt, setDryPrompt] = useState('')
 
-  const [cred, setCred] = useState({ name: 'dry24', api_url: '', token: '', method: 'POST',
-    field_map: '', headers: '' })
+  const [cred, setCred] = useState({ credential_id: 0, name: 'dry24',
+    cli_project: '', cli_php: 'php', field_map: '' })
   const [provider, setProvider] = useState<'dry24' | 'instagram'>('dry24')
   const [credentialId, setCredentialId] = useState<number | ''>('')
   const [accountId, setAccountId] = useState<number | ''>('')
   const [article, setArticle] = useState({ title: '', content: '', excerpt: '', slug: '',
-    status: 'draft', media_url: '', caption: '' })
+    status: 'draft', tanggal: '', media_url: '', caption: '' })
 
   const load = useCallback(async () => {
     try {
@@ -62,7 +62,10 @@ export default function PublishPanel({ onError }: { onError: (message: string) =
       title: article.title, content: article.content, excerpt: article.excerpt,
       slug: article.slug, status: article.status,
     }
-    if (provider === 'instagram') {
+    if (provider === 'dry24') {
+      base.tanggal = article.tanggal
+      base.media_url = article.media_url
+    } else {
       base.caption = article.caption || article.title
       base.media_url = article.media_url
     }
@@ -80,7 +83,7 @@ export default function PublishPanel({ onError }: { onError: (message: string) =
 
       <div className="publish-body">
         <div className="publish-notice"><CheckCircle2 size={14} />
-          <span>Tidak ada auto-post. Setiap kirim butuh <strong>Setujui</strong> lalu <strong>Kirim sekarang</strong>. Token tidak pernah ditampilkan.</span>
+          <span>Tidak ada auto-post. Setiap kirim butuh <strong>Setujui</strong> lalu <strong>Kirim sekarang</strong>. dry24 memakai CLI lokal — tanpa token, port, atau HTTP.</span>
         </div>
 
         <details className="publish-section" open>
@@ -135,45 +138,54 @@ export default function PublishPanel({ onError }: { onError: (message: string) =
         </details>
 
         <details className="publish-section">
-          <summary><Server size={13} /> Kredensial REST dry24</summary>
+          <summary><Server size={13} /> Jembatan CLI dry24</summary>
           <div className="publish-fields">
+            <p className="publish-hint">AgentVille dan dry24 ada di server yang sama. AgentVille menjalankan <code>{status?.preset.command ?? 'php artisan berita:publish --payload=-'}</code> di folder project dry24 — <strong>tanpa API, token, atau port tambahan</strong>. Kredensial DB tetap di <code>.env</code> dry24 dan tidak pernah dibaca AgentVille.</p>
+            <button disabled={busy} onClick={() => void run(async () => {
+              const saved = await api.publishInstallPreset()
+              setCredentialId(saved.id)
+              setCred({ credential_id: saved.id, name: saved.name,
+                cli_project: saved.cli_project, cli_php: saved.cli_php,
+                field_map: JSON.stringify(saved.field_map, null, 2) })
+            })}>Pasang preset dry24.id</button>
             <label>Nama
               <input value={cred.name} maxLength={80} onChange={(e) => setCred({ ...cred, name: e.target.value })} />
             </label>
-            <label>API URL
-              <input value={cred.api_url} maxLength={500} placeholder="https://dry24.id/api/posts"
-                     onChange={(e) => setCred({ ...cred, api_url: e.target.value })} />
+            <label>Lokasi project dry24 (folder yang berisi `artisan`)
+              <input value={cred.cli_project} maxLength={500} placeholder="D:\\Aplikasi\\Project\\Web\\dry24-develop"
+                     onChange={(e) => setCred({ ...cred, cli_project: e.target.value })} />
             </label>
-            <label>Token (disimpan terenkripsi)
-              <input type="password" value={cred.token} maxLength={8192}
-                     onChange={(e) => setCred({ ...cred, token: e.target.value })} />
+            <label>Binary PHP
+              <input value={cred.cli_php} maxLength={300} placeholder="php atau path ke php.exe"
+                     onChange={(e) => setCred({ ...cred, cli_php: e.target.value })} />
             </label>
-            <label>Metode
-              <select value={cred.method} onChange={(e) => setCred({ ...cred, method: e.target.value })}>
-                <option>POST</option><option>PUT</option><option>PATCH</option>
-              </select>
-            </label>
-            <label>Field map (opsional, JSON)
+            <label>Field map (JSON, opsional)
               <textarea rows={2} value={cred.field_map} placeholder='{"title":"judul","content":"isi"}'
                         onChange={(e) => setCred({ ...cred, field_map: e.target.value })} />
             </label>
-            <label>Header tambahan (opsional, JSON)
-              <textarea rows={2} value={cred.headers} placeholder='{"X-API-Key":"..."}'
-                        onChange={(e) => setCred({ ...cred, headers: e.target.value })} />
-            </label>
-            <button disabled={busy || status?.storage !== 'dpapi'} onClick={() => void run(async () => {
-              await api.publishSaveCredential({ ...cred, field_map: parseJson(cred.field_map, 'Field map'),
-                headers: parseJson(cred.headers, 'Header') })
-              setCred({ ...cred, token: '' })
-            })}>Simpan kredensial</button>
+            <button disabled={busy || !cred.cli_project.trim()} onClick={() => void run(async () => {
+              const saved = await api.publishSaveCredential({ ...cred,
+                credential_id: cred.credential_id || undefined,
+                field_map: parseJson(cred.field_map, 'Field map') })
+              setCredentialId(saved.id)
+              setCred({ ...cred, credential_id: saved.id })
+            })}>Simpan jembatan</button>
             {status?.credentials.map((c) => (
               <div className="publish-credential" key={c.id}>
-                <div><strong>{c.name}</strong><small>{c.api_url}</small>
-                  <small>{c.method} · {c.has_token ? 'token tersimpan' : 'tanpa token'}</small></div>
-                <button aria-label={`Hapus ${c.name}`} disabled={busy}
-                        onClick={() => void run(() => api.publishDeleteCredential(c.id))}>
-                  <Trash2 size={14} />
-                </button>
+                <div><strong>{c.name}</strong><small>{c.cli_project || 'lokasi belum diisi'}</small>
+                  <small>PHP: {c.cli_php}</small></div>
+                <div className="publish-credential-actions">
+                  <button aria-label={`Edit ${c.name}`} disabled={busy} onClick={() => {
+                    setCredentialId(c.id)
+                    setCred({ credential_id: c.id, name: c.name,
+                      cli_project: c.cli_project, cli_php: c.cli_php,
+                      field_map: JSON.stringify(c.field_map, null, 2) })
+                  }}>Edit</button>
+                  <button aria-label={`Hapus ${c.name}`} disabled={busy}
+                          onClick={() => void run(() => api.publishDeleteCredential(c.id))}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -184,7 +196,7 @@ export default function PublishPanel({ onError }: { onError: (message: string) =
           <div className="publish-fields">
             <label>Target
               <select value={provider} onChange={(e) => setProvider(e.target.value as 'dry24' | 'instagram')}>
-                <option value="dry24">dry24 (REST API)</option>
+                <option value="dry24">dry24 (CLI lokal)</option>
                 <option value="instagram">Instagram</option>
               </select>
             </label>
@@ -222,17 +234,15 @@ export default function PublishPanel({ onError }: { onError: (message: string) =
               </>
             ) : (
               <>
-                <label>Ringkasan
-                  <textarea rows={2} value={article.excerpt} onChange={(e) => setArticle({ ...article, excerpt: e.target.value })} />
+                <label>Tanggal terbit (kosongkan = sekarang)
+                  <input value={article.tanggal} placeholder="2026-11-20 07:30:00"
+                         onChange={(e) => setArticle({ ...article, tanggal: e.target.value })} />
                 </label>
-                <label>Slug
-                  <input value={article.slug} onChange={(e) => setArticle({ ...article, slug: e.target.value })} />
+                <label>URL gambar sampul (opsional → gambar_url)
+                  <input value={article.media_url} placeholder="https://…/gambar.jpg"
+                         onChange={(e) => setArticle({ ...article, media_url: e.target.value })} />
                 </label>
-                <label>Status
-                  <select value={article.status} onChange={(e) => setArticle({ ...article, status: e.target.value })}>
-                    <option value="draft">draft</option><option value="publish">publish</option>
-                  </select>
-                </label>
+                <p className="publish-hint">dry24 tidak punya field draft/status/slug/ringkasan: slug dibuat otomatis dari judul dan berita langsung tayang setelah dikirim.</p>
               </>
             )}
             <button disabled={busy} onClick={() => void run(async () => {

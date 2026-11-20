@@ -73,6 +73,10 @@ COLUMN_MIGRATIONS = {
         "provider": "TEXT",
         "model": "TEXT",
     },
+    "publish_credentials": {
+        "cli_project": "TEXT DEFAULT ''",
+        "cli_php": "TEXT DEFAULT ''",
+    },
     "messages": {
         "external_id": "TEXT",
     },
@@ -124,6 +128,7 @@ def init_db():
         _apply_migrations(conn)
     seed_defaults()
     seed_settings()
+    seed_admin()
 
 DEFAULT_AGENTS = [
     ("Atlas", "AI Coordinator", -4.2, -0.25),
@@ -217,4 +222,24 @@ def seed_settings():
         for key, value in DEFAULT_SETTINGS.items():
             if key not in existing:
                 db.add(Settings(key=key, value=value))
+        db.commit()
+
+
+def seed_admin():
+    """Create the initial operator from env vars, once, with a salted hash.
+
+    Credentials are supplied at deploy time, never baked into source. If either env var
+    is missing, no user is created and the operator can add one with the same command.
+    """
+    username = os.getenv("AGENTVILLE_ADMIN_USER", "").strip()
+    password = os.getenv("AGENTVILLE_ADMIN_PASSWORD", "")
+    if not username or not password:
+        return
+    from app.auth import hash_password
+    from app.models import User
+
+    with SessionLocal() as db:
+        if db.query(User).filter(User.username == username).first() is not None:
+            return
+        db.add(User(username=username, password_hash=hash_password(password)))
         db.commit()

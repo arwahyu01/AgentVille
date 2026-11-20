@@ -197,11 +197,20 @@ class TaskPlan(BaseModel):
 
 
 def extract_json(text: str) -> dict | None:
-    match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
+    """Return the first complete JSON object in a provider reply.
+
+    Tolerates surrounding prose, fenced blocks and trailing commentary. It never
+    repairs truncated or structurally invalid JSON, so an unreadable verdict stays
+    unreadable and fails closed.
+    """
+    if not text:
         return None
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    decoder = json.JSONDecoder(strict=False)
+    for match in re.finditer(r"\{", text):
+        try:
+            parsed, _ = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None

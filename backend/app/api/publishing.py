@@ -29,13 +29,9 @@ def list_jobs(limit: int = 50, db: Session = Depends(get_db)):
 
 class CredentialRequest(BaseModel):
     name: str = Field(default="dry24", min_length=1, max_length=80)
-    api_url: str = Field(min_length=1, max_length=500)
-    token: str = Field(default="", max_length=8192)
-    method: str = Field(default="POST", pattern="^(POST|PUT|PATCH)$")
-    auth_header: str = Field(default="Authorization", max_length=60)
-    auth_scheme: str = Field(default="Bearer", max_length=30)
+    cli_project: str = Field(default="", max_length=500)
+    cli_php: str = Field(default="php", max_length=300)
     field_map: dict = Field(default_factory=dict)
-    headers: dict = Field(default_factory=dict)
     credential_id: int | None = None
 
 
@@ -43,10 +39,18 @@ class CredentialRequest(BaseModel):
 def save_credential(payload: CredentialRequest, db: Session = Depends(get_db)):
     try:
         return service.save_credential(
-            db, name=payload.name, api_url=payload.api_url, token=payload.token,
-            method=payload.method, auth_header=payload.auth_header,
-            auth_scheme=payload.auth_scheme, field_map=payload.field_map,
-            headers=payload.headers, credential_id=payload.credential_id)
+            db, name=payload.name, cli_project=payload.cli_project,
+            cli_php=payload.cli_php, field_map=payload.field_map,
+            credential_id=payload.credential_id)
+    except PublishError as e:
+        raise _http(e) from None
+
+
+@router.post("/credentials/preset")
+def install_preset(db: Session = Depends(get_db)):
+    """Install the dry24 local-CLI bridge mapping (no token, no endpoint)."""
+    try:
+        return service.install_dry24_preset(db)
     except PublishError as e:
         raise _http(e) from None
 

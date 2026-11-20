@@ -161,6 +161,8 @@ QC_INSTRUCTIONS = (
     "path, line, test or result. The packet lists every citable ref as workspace:<path>, "
     "artifact:<path>, or missing:<path>; cite only those exact refs. Acceptance criteria are "
     "labelled C1..Cn in the task; report every one exactly once using its id. "
+    "Keep each criterion 'detail' under 160 characters and 'evidence' under 500 characters so "
+    "the object stays compact and complete. "
     "Respond with ONLY one JSON object: "
     '{"verdict": "pass"|"fail", "criteria": [{"id": "C1", "criterion": str, "met": bool, '
     '"detail": str}], "findings": str, "evidence": str, "artifacts_checked": ["workspace:..."], '
@@ -169,8 +171,12 @@ QC_INSTRUCTIONS = (
     "in the packet, artifacts_checked contains at least one existing workspace: or artifact: ref, "
     "findings and evidence quote concrete details from the packet, and failed_steps is empty. "
     "For fail, artifacts_checked may be empty when no artifact could be checked; never invent a ref. "
-    "List the 0-based step indexes responsible (empty when unknown) and cite a missing: ref only "
-    "when that exact missing: ref exists in the packet. No markdown, no commentary, JSON only."
+    "List the 0-based step indexes responsible (0..N-1, never a task id such as 12 or an artifact "
+    "name such as task-12.md; empty when unknown) and cite a missing: ref only "
+    "when that exact missing: ref exists in the packet. A keyword quoted inside a search pattern "
+    "or an explanation (for example a QA report writing 'TODO' while stating it found none) is "
+    "not proof that the target artifact contains that keyword — judge the quoted target lines. "
+    "No markdown, no commentary, JSON only."
 )
 
 MANAGER = Persona(key="manager", name="Atlas", role="AI Coordinator", instructions=PLANNER_INSTRUCTIONS)

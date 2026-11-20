@@ -6,7 +6,6 @@ the project contract never auto-approves them. The token is never copied into a 
 """
 
 import json
-import urllib.parse
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -64,6 +63,7 @@ def status(db: Session) -> dict:
                 .order_by(IntegrationAccount.id).all())
     return {
         "storage": "dpapi" if storage_available() else "unavailable",
+        "preset": dry24.DRY24_PRESET,
         "credentials": [dry24.credential_summary(row) for row in credentials],
         "instagram_accounts": [
             {"id": a.id, "label": a.label, "external_id": a.external_id, "status": a.status}
@@ -82,7 +82,10 @@ def preview(db: Session, provider: str, article, credential_id: int | None,
         credential = db.get(PublishCredential, credential_id) if credential_id else None
         if credential is None or not credential.enabled:
             raise PublishError("Kredensial dry24 tidak ditemukan atau nonaktif")
-        result = dry24.preview(credential, article)
+        try:
+            result = dry24.preview(credential, article)
+        except dry24.PublishError as e:
+            raise PublishError(str(e)) from None
     else:
         account = db.get(IntegrationAccount, account_id) if account_id else None
         if account is None or account.provider != "instagram":
@@ -153,36 +156,58 @@ def execute(db: Session, job_id: int) -> dict:
     return _summary(row)
 
 
-def save_credential(db: Session, *, name: str, api_url: str, token: str, method: str = "POST",
-                    auth_header: str = "Authorization", auth_scheme: str = "Bearer",
-                    field_map: dict | None = None, headers: dict | None = None,
+def save_credential(db: Session, *, name: str, cli_project: str, cli_php: str = "php",
+                    field_map: dict | None = None,
                     credential_id: int | None = None) -> dict:
-    if not storage_available():
-        raise PublishError("Penyimpanan token terenkripsi tidak tersedia di sistem ini")
-    from app.integrations.secure_store import seal
+    """Store the local CLI bridge settings. There is no token to seal: dry24 keeps its own DB
+    credentials in its own .env and AgentVille only runs `php artisan berita:publish`."""
     name = (name or "dry24").strip()[:80]
-    api_url = (api_url or "").strip()[:500]
-    parsed = urllib.parse.urlparse(api_url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise PublishError("API URL tidak valid (harus http/https)")
-    method = (method or "POST").strip().upper()
-    if method not in ("POST", "PUT", "PATCH"):
-        raise PublishError("Metode harus POST, PUT, atau PATCH")
+    cli_project = (cli_project or "").strip()[:500]
+    cli_php = (cli_php or "php").strip()[:300] or "php"
+    try:
+        dry24.validate_location(cli_project, cli_php)
+    except dry24.PublishError as e:
+        raise PublishError(str(e)) from None
     row = db.get(PublishCredential, credential_id) if credential_id else None
     if row is None:
-        row = PublishCredential(name=name, api_url=api_url)
+        row = PublishCredential(name=name, cli_project=cli_project)
         db.add(row)
+    if field_map is None and row.field_map_json:
+        field_map = json.loads(row.field_map_json)
     row.name = name
-    row.api_url = api_url
-    row.method = method
-    row.auth_header = (auth_header or "Authorization")[:60]
-    row.auth_scheme = (auth_scheme or "Bearer")[:30]
+    row.cli_project = cli_project
+    row.cli_php = cli_php
     row.field_map_json = json.dumps(field_map or {}, ensure_ascii=False)
-    row.headers_json = json.dumps(headers or {}, ensure_ascii=False)
-    if token:
-        if len(token) > 8192:
-            raise PublishError("Token terlalu panjang")
-        row.token = seal(token)
+    # Legacy columns are intentionally cleared: no HTTP endpoint and no DPAPI token anymore.
+    row.api_url = ""
+    row.method = "CLI"
+    row.token = ""
+    row.auth_header = ""
+    row.auth_scheme = ""
+    row.headers_json = "{}"
+    db.commit()
+    db.refresh(row)
+    return dry24.credential_summary(row)
+
+
+def install_dry24_preset(db: Session) -> dict:
+    """Create (or return) the credential row for the local dry24 CLI bridge.
+
+    The project path can be pre-filled by the AGENTVILLE_DRY24_PROJECT env var; otherwise the
+    operator must fill it in the UI. Nothing is executed here and no secret is stored.
+    """
+    preset = dry24.DRY24_PRESET
+    existing = (db.query(PublishCredential)
+                .filter(PublishCredential.name == preset["name"])
+                .first())
+    if existing is not None:
+        return dry24.credential_summary(existing)
+    # Deliberately skip path validation: the operator may install the preset first and fill the
+    # project location afterwards. Validation happens on save and on preview.
+    row = PublishCredential(
+        name=preset["name"], cli_project=preset["cli_project"], cli_php=preset["cli_php"],
+        field_map_json=json.dumps(preset["field_map"], ensure_ascii=False))
+    db.add(row)
     db.commit()
     db.refresh(row)
     return dry24.credential_summary(row)

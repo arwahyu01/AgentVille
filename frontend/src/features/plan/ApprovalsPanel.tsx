@@ -116,7 +116,7 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
                       <ShieldCheck size={13} /> QC ulang
                     </button>
                     <button className="secondary-button compact" disabled={busy === item.key}
-                            onClick={() => void run(item.key, () => api.stopTask(task.id))}>
+                            onClick={() => void run(item.key, () => api.cancelTask(task.id))}>
                       <X size={13} /> Tutup
                     </button>
                   </div>
@@ -140,7 +140,7 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
         })}
       </ul>
       {items.some((item) => item.kind === 'failed-run') && (
-        <p className="approvals-hint">Revisi dan QC ulang tersedia sebagai tindakan opsional; hasil terakhir tetap bisa dibuka.</p>
+        <p className="approvals-hint">Revisi dan QC ulang opsional. “Tutup” mengarsipkan percobaan gagal (status menjadi cancelled) dan hasil terakhir tetap bisa dibuka.</p>
       )}
     </section>
   )

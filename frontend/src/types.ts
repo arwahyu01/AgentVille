@@ -182,6 +182,11 @@ export interface TaskEvent {
   created_at: string
 }
 
+export interface AuthUser {
+  id: number
+  username: string
+}
+
 export interface StreamEvent {
   /** Two journals share the SSE stream and have independent id sequences. */
   kind: 'task' | 'office'
@@ -246,18 +251,14 @@ export interface CharacterChatReply {
   latency_s: number
 }
 
-/** A Claude Code session reported through the AgentVille HTTP hooks (`scripts/claude_hooks.py`). */
+/** Local-CLI bridge to the dry24 Laravel app on the same server. No token is stored. */
 export interface PublishCredential {
   id: number
   name: string
-  api_url: string
-  method: string
-  auth_header: string
-  auth_scheme: string
+  cli_project: string
+  cli_php: string
   field_map: Record<string, string>
-  headers: Record<string, string>
   enabled: boolean
-  has_token: boolean
   created_at: string | null
 }
 
@@ -286,8 +287,19 @@ export interface NewsRunInfo {
   topics: string
 }
 
+export interface PublishPreset {
+  name: string
+  cli_project: string
+  cli_php: string
+  field_map: Record<string, string>
+  command: string
+  note: string
+}
+
 export interface PublishStatus {
+  /** DPAPI is still used for Instagram/Meta credentials; dry24 CLI needs no token at all. */
   storage: 'dpapi' | 'unavailable'
+  preset: PublishPreset
   credentials: PublishCredential[]
   instagram_accounts: { id: number; label: string; external_id: string; status: string }[]
   jobs: PublishJob[]

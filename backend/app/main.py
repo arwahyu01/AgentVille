@@ -1,15 +1,18 @@
 from contextlib import asynccontextmanager
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import auth
 from app.database import init_db
 from app.office_ops import OfficeOps
 from app.orchestrator import Orchestrator
 from app.publishing.scheduler import NewsScheduler
 from app.channels import telegram
-from app.api import (agents, ai, channels, characters, claude, conversations, events, health,
-                     integrations, preview, publishing, tasks)
+from app.api import (agents, ai, auth as auth_api, channels, characters, claude, conversations,
+                     events, health, integrations, preview, publishing, tasks)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,15 +41,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AgentVille API", version="0.2.0", lifespan=lifespan)
 
-# Local development only. If deployed beyond localhost, add authentication and tighten CORS.
+# Registered first so CORS (added last) stays outermost and can answer preflight requests
+# before the session gate sees them.
+app.add_middleware(auth.AuthMiddleware)
+
+_origins = [o.strip() for o in os.getenv(
+    "AGENTVILLE_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_origins=_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Last-Event-ID"],
 )
 
+app.include_router(auth_api.router, prefix="/api")
 app.include_router(health.router, prefix="/api")
 app.include_router(agents.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")

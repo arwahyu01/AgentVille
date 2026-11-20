@@ -7,6 +7,8 @@ import tempfile
 # so any endpoint that bypasses the get_db override would write user data.
 _TMP_DIR = tempfile.mkdtemp(prefix="agentville-test-")
 os.environ["AGENTVILLE_DATABASE_URL"] = f"sqlite:///{os.path.join(_TMP_DIR, 'test.db')}"
+# Existing endpoint tests exercise the API directly; session gating is tested separately.
+os.environ["AGENTVILLE_AUTH_ENABLED"] = "0"
 
 import pytest
 from fastapi.testclient import TestClient

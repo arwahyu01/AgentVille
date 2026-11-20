@@ -1,27 +1,40 @@
-"""Publisher for a site's custom REST API (dry24.id in this deployment).
+"""Publish berita ke dry24 lewat CLI lokal, bukan HTTP.
 
-The endpoint, auth header, and field names are configuration, not hard-coded guesses: no API
-documentation was supplied, so the connector exposes a generic, testable contract. `preview()`
-never opens a connection; `publish()` is only callable from an approved job.
+AgentVille dan dry24 berada di server yang sama, jadi AgentVille memanggil
+`php artisan berita:publish --payload=-` dengan JSON di STDIN. Tidak ada port, tidak ada
+token, dan AgentVille tidak pernah membaca `.env` milik dry24. Command itu memakai
+`App\\Services\\BeritaPublisher` yang sama dengan implementasi Laravel lain.
+
+`preview()` hanya menghitung payload; `publish()` hanya boleh dipanggil dari job yang sudah
+disetujui (lihat service.py).
 """
 
 import json
-import urllib.error
-import urllib.parse
-import urllib.request
-
-from sqlalchemy.orm import Session
+import os
+import shutil
+import subprocess
+from pathlib import Path
 
 from app.agent_actions import redact
-from app.integrations.secure_store import unseal
-from app.models import PublishCredential
 
-TIMEOUT_S = 20
-MAX_RESPONSE = 8000
+TIMEOUT_S = 90
 MAX_PAYLOAD = 512_000
+MAX_OUTPUT = 20_000
+
 DEFAULT_FIELDS = {
-    "title": "title", "content": "content", "excerpt": "excerpt",
-    "slug": "slug", "status": "status", "categories": "categories",
+    "title": "judul",
+    "content": "isi",
+    "tanggal": "tanggal",
+    "media_url": "gambar_url",
+}
+
+DRY24_PRESET = {
+    "name": "dry24.id (CLI lokal)",
+    "cli_project": os.getenv("AGENTVILLE_DRY24_PROJECT", ""),
+    "cli_php": os.getenv("AGENTVILLE_DRY24_PHP", "php"),
+    "field_map": dict(DEFAULT_FIELDS),
+    "command": "php artisan berita:publish --payload=-",
+    "note": "JSON dikirim lewat STDIN. Tanpa HTTP, port, atau token Sanctum.",
 }
 
 
@@ -41,77 +54,117 @@ def _json_object(value: str, what: str) -> dict:
     return result
 
 
-def credential_summary(row: PublishCredential) -> dict:
+def credential_summary(row) -> dict:
     return {
-        "id": row.id, "name": row.name, "api_url": row.api_url, "method": row.method,
-        "auth_header": row.auth_header, "auth_scheme": row.auth_scheme,
+        "id": row.id,
+        "name": row.name,
+        "cli_project": row.cli_project or "",
+        "cli_php": row.cli_php or "php",
         "field_map": _json_object(row.field_map_json, "field_map"),
-        "headers": {k: "***" for k in _json_object(row.headers_json, "headers")},
-        "enabled": bool(row.enabled), "has_token": bool(row.token),
+        "enabled": bool(row.enabled),
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 
 
-def build(credential: PublishCredential, article: dict) -> tuple[str, str, dict, dict]:
-    """Return (method, url, headers, payload). The token is included only in the returned
-    headers for the actual send; callers must use `preview()` for anything user-visible."""
-    url = (credential.api_url or "").strip()
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise PublishError("API URL tidak valid (harus http/https)")
-    method = (credential.method or "POST").strip().upper()
-    if method not in ("POST", "PUT", "PATCH"):
-        raise PublishError("Metode harus POST, PUT, atau PATCH")
+def validate_location(cli_project: str, cli_php: str) -> tuple[Path, str]:
+    """Fail early for a bad project/PHP path, before a preview or a job is created."""
+    project = (cli_project or "").strip()
+    if not project:
+        raise PublishError("Lokasi project dry24 belum diisi")
+    project_path = Path(project).expanduser()
+    if not project_path.is_dir():
+        raise PublishError("Lokasi project dry24 tidak ditemukan")
+    if not (project_path / "artisan").is_file():
+        raise PublishError("File artisan tidak ditemukan di lokasi project dry24")
+
+    php = (cli_php or "php").strip() or "php"
+    if "/" in php or "\\" in php:
+        php_path = Path(php).expanduser()
+        if not php_path.is_file():
+            raise PublishError("Path binary PHP tidak ditemukan")
+        php = str(php_path)
+    else:
+        found = shutil.which(php)
+        if not found:
+            raise PublishError("PHP tidak ditemukan di PATH")
+        php = found
+    return project_path, php
+
+
+def _resolve(credential) -> tuple[Path, str]:
+    return validate_location(credential.cli_project, credential.cli_php)
+
+
+def build(credential, article: dict) -> tuple[list[str], dict, Path]:
+    project_path, php = _resolve(credential)
     fields = {**DEFAULT_FIELDS, **_json_object(credential.field_map_json, "field_map")}
     content = article.get("content", "")
     if not isinstance(content, str) or not content.strip():
         raise PublishError("Artikel tidak memiliki isi (content kosong)")
+
     payload = {}
     for source, target in fields.items():
         if source in article and article[source] not in (None, ""):
             payload[str(target)] = article[source]
+    if not payload.get("judul") or not payload.get("isi"):
+        raise PublishError("Field map harus menghasilkan judul dan isi untuk dry24")
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     if len(body) > MAX_PAYLOAD:
         raise PublishError("Payload terlalu besar (batas 512 KB)")
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    headers.update({str(k): str(v) for k, v in _json_object(credential.headers_json, "headers").items()})
-    token = unseal(credential.token) if credential.token else ""
-    if token:
-        header = credential.auth_header or "Authorization"
-        scheme = credential.auth_scheme or "Bearer"
-        headers[header] = f"{scheme} {token}".strip()
-    return method, url, headers, payload
+
+    args = [php, str(project_path / "artisan"), "--no-ansi", "berita:publish", "--payload=-"]
+    return args, payload, project_path
 
 
-def preview(credential: PublishCredential, article: dict) -> dict:
-    """Describe the exact request without a token or any network call."""
-    method, url, headers, payload = build(credential, article)
-    safe_headers = {k: ("***" if k.lower() == (credential.auth_header or "authorization").lower()
-                        else redact(v, 120)) for k, v in headers.items()}
+def preview(credential, article: dict) -> dict:
+    """Describe the exact payload without running any command."""
+    _args, payload, project_path = build(credential, article)
     return {
-        "provider": "dry24", "method": method, "url": url,
-        "headers": safe_headers, "payload": payload,
-        "note": "Token disembunyikan. Preview ini tidak mengirim apa pun.",
+        "provider": "dry24",
+        "transport": "cli",
+        "project": str(project_path),
+        "command": DRY24_PRESET["command"],
+        "payload": payload,
+        "note": "Tidak ada HTTP/token. Preview ini tidak menjalankan perintah apa pun.",
     }
 
 
-def publish(db: Session, credential: PublishCredential, article: dict) -> dict:
-    method, url, headers, payload = build(credential, article)
-    request = urllib.request.Request(
-        url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers=headers, method=method)
+def publish(db, credential, article: dict) -> dict:
+    """Run the local CLI. Only called by service.execute() after explicit approval."""
+    args, payload, project_path = build(credential, article)
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            body = response.read(MAX_RESPONSE).decode("utf-8", "replace")
-            status = response.status
-    except urllib.error.HTTPError as e:
-        detail = e.read(MAX_RESPONSE).decode("utf-8", "replace") if e.fp else ""
-        raise PublishError(f"HTTP {e.code} dari dry24: {redact(detail, 200)}") from None
-    except urllib.error.URLError:
-        raise PublishError("dry24 tidak bisa dihubungi (jaringan/timeout)") from None
-    try:
-        parsed = json.loads(body)
-        result = parsed if isinstance(parsed, dict) else {"response": parsed}
-    except json.JSONDecodeError:
-        result = {"response": redact(body, 300)}
-    return {"http_status": status, "result": result}
+        proc = subprocess.run(
+            args,
+            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(project_path),
+            timeout=TIMEOUT_S,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise PublishError(f"dry24 CLI timeout setelah {TIMEOUT_S} detik") from None
+    except OSError as e:
+        raise PublishError(f"dry24 CLI gagal dijalankan: {redact(str(e), 200)}") from None
+
+    out = proc.stdout.decode("utf-8", "replace")[:MAX_OUTPUT]
+    err = proc.stderr.decode("utf-8", "replace")[:1000]
+    lines = [line for line in out.splitlines() if line.strip()]
+    result = {}
+    if lines:
+        try:
+            parsed = json.loads(lines[-1])
+            if isinstance(parsed, dict):
+                result = parsed
+        except json.JSONDecodeError:
+            pass
+
+    if proc.returncode != 0 or result.get("status") is False:
+        detail = result.get("message") if result else None
+        if not detail:
+            detail = err.strip() or out.strip() or f"exit code {proc.returncode}"
+        raise PublishError(f"dry24 CLI: {redact(str(detail), 400)}")
+    if not result or result.get("status") is not True:
+        raise PublishError("dry24 CLI tidak mengembalikan JSON hasil yang valid")
+
+    return {"exit_code": proc.returncode, "result": result}

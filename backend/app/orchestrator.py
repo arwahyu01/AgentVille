@@ -1637,6 +1637,34 @@ class Orchestrator(threading.Thread):
             provider_used = result.provider or provider_name
             model_used = result.model or cfg["text_model"]
             payload = extract_json(result.text) if result.ok else None
+            if (payload is None and result.ok and allow_revision
+                    and iteration <= cfg["retry_max"] and not self._cancelled(anchor_id)):
+                # A long QC answer can be truncated or wrapped in commentary. Give the
+                # reviewer one bounded chance to re-emit a compact object; still fail
+                # closed if it cannot. The original reply stays available for diagnostics.
+                compact_prompt = review_prompt + (
+                    "\n\nFORMAT RECOVERY: the previous reply was not one complete JSON object. "
+                    "Reply with ONLY a compact JSON object. Keep each criterion 'detail' "
+                    "under 160 characters and 'evidence' under 500 characters. Do not repeat "
+                    "the artifact inventory or add commentary."
+                )
+                retry = self._call(provider, qc_persona, compact_prompt, timeout_s, anchor_id)
+                self._log_switches(provider, anchor_id)
+                if not self._cancelled(anchor_id) and retry.ok:
+                    retry_payload = extract_json(retry.text)
+                    if retry_payload is not None:
+                        payload = retry_payload
+                        result = retry
+                        provider_used = result.provider or provider_used
+                        model_used = result.model or model_used
+                        with SessionLocal() as db:
+                            add_event(
+                                db, anchor_id, "qc_format_retry",
+                                "QC verdict unreadable; reviewer re-issued a compact JSON reply",
+                                conversation_id=conversation_id,
+                                provider=provider_used, model=model_used,
+                            )
+                            db.commit()
             verdict = "inconclusive"
             findings = ""
             evidence_text = ""

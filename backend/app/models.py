@@ -31,6 +31,16 @@ class Settings(Base):
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
+class User(Base):
+    """Console login. Only the PBKDF2 hash is stored; the plaintext password never is."""
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(160), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -268,13 +278,17 @@ class PublishCredential(Base):
     __tablename__ = "publish_credentials"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
-    api_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    method: Mapped[str] = mapped_column(String(8), default="POST", nullable=False)
+    # Legacy HTTP-only columns are kept for additive migrations, but the dry24 bridge uses CLI.
+    api_url: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    method: Mapped[str] = mapped_column(String(8), default="CLI", nullable=False)
     token: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    auth_header: Mapped[str] = mapped_column(String(60), default="Authorization", nullable=False)
-    auth_scheme: Mapped[str] = mapped_column(String(30), default="Bearer", nullable=False)
+    auth_header: Mapped[str] = mapped_column(String(60), default="", nullable=False)
+    auth_scheme: Mapped[str] = mapped_column(String(30), default="", nullable=False)
     field_map_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    headers_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    headers_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # Local-CLI bridge: AgentVille never reads dry24's .env, it only invokes php artisan.
+    cli_project: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    cli_php: Mapped[str] = mapped_column(String(300), default="", nullable=False)
     enabled: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

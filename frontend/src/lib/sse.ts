@@ -13,7 +13,8 @@ export function useEventStream(onEvent: (event: StreamEvent) => void): boolean {
 
   useEffect(() => {
     if (typeof EventSource === 'undefined') return
-    const source = new EventSource(`${API_BASE}/api/events/stream`)
+    // The session lives in an HttpOnly cookie, so cross-origin deployments must opt in.
+    const source = new EventSource(`${API_BASE}/api/events/stream`, { withCredentials: true })
     source.addEventListener('open', () => setConnected(true))
     source.addEventListener('error', () => setConnected(false))
     source.addEventListener('task_event', (event) => {
