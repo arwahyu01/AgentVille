@@ -52,7 +52,7 @@ export default function PlanPanel({ conversation, refreshKey, onAction, onError 
   return (
     <div className="plan-panel" data-testid="plan-panel">
       <div className="panel-heading small">
-        <div><h3><Workflow size={14} /> Rencana kerja</h3><p>Disetujui otomatis oleh pimpinan · langkah dibagi per tupoksi.</p></div>
+        <div><h3><Workflow size={14} /> Rencana kerja</h3><p>Disetujui otomatis oleh pimpinan · tindakan eksternal menunggu keputusanmu.</p></div>
       </div>
       {current == null && <p className="plan-empty">Belum ada rencana — pimpinan masih mengklarifikasi permintaan.</p>}
       {current && (
@@ -62,12 +62,39 @@ export default function PlanPanel({ conversation, refreshKey, onAction, onError 
             <span className={`status-pill ${current.status === 'proposed' ? 'queued' : current.status}`}>{current.status}</span>
             {current.summary && <span className="plan-summary">{current.summary}</span>}
           </div>
+          {current.requires_approval && conversation.status === 'awaiting_approval' && (
+            <div className="plan-gate">
+              <strong>Butuh persetujuanmu sebelum jalan</strong>
+              <ul>{(current.approval_reasons ?? []).map((reason) => <li key={reason}>{reason}</li>)}</ul>
+              <button className="primary-button compact" disabled={busy}
+                      onClick={() => void act(() => api.approvePlan(conversation.id, current.version))}>
+                Setujui rencana v{current.version}
+              </button>
+            </div>
+          )}
+          {current.goal && <p className="plan-goal"><strong>Tujuan:</strong> {current.goal}</p>}
+          {current.scope && <p className="plan-scope"><strong>Batas kerja:</strong> {current.scope}</p>}
+          {current.assumptions && current.assumptions.length > 0 && (
+            <p className="plan-note"><strong>Asumsi:</strong> {current.assumptions.join('; ')}</p>
+          )}
+          {current.risks && current.risks.length > 0 && (
+            <p className="plan-note"><strong>Risiko:</strong> {current.risks.join('; ')}</p>
+          )}
+          {current.external_actions && current.external_actions.length > 0 && (
+            <p className="plan-note"><strong>Tindakan eksternal:</strong> {current.external_actions.join('; ')}</p>
+          )}
           <ol className="plan-steps">
             {current.steps.map((step, index) => (
               <li key={index}>
                 <strong>{index}. {step.title}</strong>
                 <span>{step.instruction}</span>
-                <em>{step.agent_role}{step.uses_tools ? ' · menulis file' : ''}{step.depends_on.length ? ` · setelah ${step.depends_on.join(', ')}` : ''}</em>
+                <em>
+                  {step.agent_role}
+                  {step.risk && step.risk !== 'low' ? ` · risiko ${step.risk}` : ''}
+                  {step.uses_tools ? ' · menulis file' : ''}
+                  {step.tools && step.tools.length > 0 ? ` · tools: ${step.tools.join(', ')}` : ''}
+                  {step.depends_on.length ? ` · setelah ${step.depends_on.join(', ')}` : ''}
+                </em>
                 {step.acceptance_criteria && step.acceptance_criteria.length > 0 && (
                   <ul className="plan-criteria">{step.acceptance_criteria.map((c) => <li key={c}>{c}</li>)}</ul>
                 )}

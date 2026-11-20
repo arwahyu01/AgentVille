@@ -18,21 +18,171 @@ import os
 import subprocess
 import sys
 import threading
+import time
 
 log = logging.getLogger(__name__)
 
 TASKKILL_TIMEOUT_S = 15
 DRAIN_GRACE_S = 10.0
+PIPE_RECLAIM_S = 20.0
+# A CLI that produced no output at all for this long is not working, it is stuck on
+# something invisible (a dead model, an auth prompt, a provider that never streams). Waiting
+# for the full request timeout turns one bad engine into a twenty-minute silence.
+DEFAULT_IDLE_S = 120.0
 
 
-def wait_for_drain(reader: threading.Thread, grace_s: float = DRAIN_GRACE_S) -> bool:
-    """Wait until the communicate() reader thread exits, which only happens when stdout
-    and stderr reached EOF — i.e. every process holding the inherited pipe handles is
-    gone. False means a survivor may still write into the workspace or hold the pipes,
-    and the caller must say so instead of returning a clean-looking timeout result."""
+class OutputPump:
+    """Reads a CLI's stdout/stderr line by line so liveness is observable.
+
+    `subprocess.communicate()` only returns when both pipes reach EOF, which made a silent
+    engine indistinguishable from a busy one: the step stayed `running` until the whole
+    timeout expired. This pump records the last time any output arrived and keeps whatever
+    was captured, so a stuck engine can be stopped early and its partial output still read.
+
+    A process object without readable pipes falls back to `communicate()`. Cancellation and
+    the overall timeout still apply there; only per-line idle detection is unavailable.
+    """
+
+    MAX_BYTES = 4_000_000
+
+    def __init__(self, proc, prompt: str = ""):
+        self._proc = proc
+        self._prompt = prompt
+        self._out: list[str] = []
+        self._err: list[str] = []
+        self._size = 0
+        self._lock = threading.Lock()
+        self.last_activity = time.monotonic()
+        streams = getattr(proc, "stdout", None) is not None and getattr(proc, "stderr", None) is not None
+        self.feeds_stdin = streams
+        if streams:
+            self._threads = [
+                threading.Thread(target=self._pump, args=(proc.stdout, self._out), daemon=True),
+                threading.Thread(target=self._pump, args=(proc.stderr, self._err), daemon=True),
+            ]
+        else:
+            self._threads = [threading.Thread(target=self._communicate, daemon=True)]
+
+    def start(self) -> "OutputPump":
+        for thread in self._threads:
+            thread.start()
+        return self
+
+    def _communicate(self) -> None:
+        try:
+            out, err = self._proc.communicate(input=self._prompt)
+        except Exception:  # noqa: BLE001 - a closed pipe is a normal ending
+            return
+        with self._lock:
+            self._out.append(out or "")
+            self._err.append(err or "")
+            self.last_activity = time.monotonic()
+
+    def _pump(self, stream, sink: list[str]) -> None:
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                with self._lock:
+                    self.last_activity = time.monotonic()
+                    if self._size < self.MAX_BYTES:
+                        sink.append(line)
+                        self._size += len(line)
+        except Exception:  # noqa: BLE001 - a closed pipe is a normal ending
+            pass
+
+    def is_alive(self) -> bool:
+        return any(thread.is_alive() for thread in self._threads)
+
+    def join(self, timeout: float | None = None) -> None:
+        for thread in self._threads:
+            thread.join(timeout)
+
+    def text(self) -> tuple[str, str]:
+        with self._lock:
+            return "".join(self._out), "".join(self._err)
+
+
+def reap(proc, timeout_s: float = 5.0) -> int | None:
+    """Collect the child's exit status once its output has reached EOF.
+
+    The reader can see EOF a moment before the OS reaps the process, so `returncode` is
+    still ``None`` at that point. Comparing ``None != 0`` used to mark a successful run as
+    failed, and the error text was the first 300 characters of the NDJSON stream — which is
+    how a perfectly good answer became "opencode exited with code None". ``None`` here means
+    "not observable", never "non-zero"."""
+    wait = getattr(proc, "wait", None)
+    if callable(wait):
+        try:
+            wait(timeout=timeout_s)
+        except Exception:  # noqa: BLE001 - a fake or already-reaped process
+            pass
+    return getattr(proc, "returncode", None)
+
+
+def wait_for_drain(reader, grace_s: float = DRAIN_GRACE_S) -> bool:
+    """Wait until the reader (thread or pump) exits, which only happens when stdout and
+    stderr reached EOF — i.e. every process holding the inherited pipe handles is gone.
+    False means a survivor may still write into the workspace or hold the pipes, and the
+    caller must say so instead of returning a clean-looking timeout result."""
     if reader.is_alive():
         reader.join(grace_s)
     return not reader.is_alive()
+
+
+def watch_run(proc, reader, deadline: float, should_cancel=None,
+              grace_s: float = PIPE_RECLAIM_S,
+              idle_s: float | None = None, activity=None) -> str:
+    """Watch a running CLI and the reader draining its output.
+
+    Returns ``"finished"``, ``"cancelled"``, ``"timeout"`` or ``"idle"``.
+
+    Two failure modes are handled that used to look like a busy engine:
+
+    * **silence** — the process is alive but has said nothing for `idle_s` seconds. It is
+      killed and reported as `idle`, so a dead/unreachable model fails in ~2 minutes instead
+      of consuming the entire request timeout.
+    * **exited but pipes still open** — a descendant inherited the handles. The tree is
+      killed once; if the pipes remain open the reader is abandoned with its captured
+      output instead of blocking the step forever.
+    """
+    reclaimed = False
+    main_done_at: float | None = None
+    while reader.is_alive():
+        if should_cancel is not None and should_cancel():
+            kill_tree(proc.pid)
+            return "cancelled"
+        now = time.monotonic()
+        if now > deadline:
+            kill_tree(proc.pid)
+            return "timeout"
+        last = activity() if activity is not None else getattr(reader, "last_activity", None)
+        poll = getattr(proc, "poll", None)
+        exited = poll() if callable(poll) else None
+        if idle_s and exited is None and last is not None and now - last > idle_s:
+            log.warning("pid %s produced no output for %.0fs; stopping it", proc.pid, idle_s)
+            kill_tree(proc.pid)
+            return "idle"
+        if exited is not None:
+            if main_done_at is None:
+                main_done_at = now
+            if not reclaimed and now - main_done_at >= grace_s:
+                reclaimed = True
+                log.info("pid %s exited but its output pipes are still open; "
+                         "reclaiming leftover descendants so the step can finish",
+                         proc.pid)
+                kill_tree(proc.pid)
+                reader.join(2.0)
+                if reader.is_alive():
+                    # The handles are held by something we can no longer reach; the text we
+                    # already captured is the result, and the caller is told it is partial.
+                    log.warning("pid %s pipes are still open; continuing with captured output",
+                                proc.pid)
+                    return "finished"
+        else:
+            main_done_at = None
+        reader.join(0.5)
+    return "finished"
 
 
 def kill_tree(pid: int) -> bool:

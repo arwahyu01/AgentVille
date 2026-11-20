@@ -25,6 +25,7 @@ def _read_config(db: Session) -> AIConfigRead:
         agent_chat_mode=settings_store.agent_chat_mode(db),
         rotate_models_enabled=settings_store.rotate_models_enabled(db),
         rotate_models_max=settings_store.rotate_models_max(db),
+        external_approval_enabled=settings_store.external_approval_enabled(db),
         providers=registry.availability(),
     )
 
@@ -64,6 +65,11 @@ def patch_config(payload: AIConfigPatch, db: Session = Depends(get_db)):
         settings_store.set_setting(db, "rotate_models_enabled", "1" if payload.rotate_models_enabled else "0")
     if payload.rotate_models_max is not None:
         settings_store.set_setting(db, "rotate_models_max", str(payload.rotate_models_max))
+    if payload.external_approval_enabled is not None:
+        if not payload.external_approval_enabled:
+            raise HTTPException(status_code=422,
+                                detail="High-risk and external approval gates cannot be disabled")
+        settings_store.set_setting(db, "external_approval_enabled", "1")
     db.commit()
     return _read_config(db)
 

@@ -7,7 +7,8 @@ from app.conversation_service import (ConversationError, add_message, approve_pl
                                       cancel_conversation, create_conversation, get_conversation,
                                       get_plan_row, list_messages, plan_history, request_revision)
 from app.database import get_db
-from app.models import Conversation, Task
+from app.models import Conversation, Message, Task
+from app.plan_schema import TaskPlan
 from app.schemas import (ApproveRequest, ConversationCreate, ConversationRead, MessageCreate,
                          MessageRead, PlanRead, ReviseRequest)
 
@@ -28,20 +29,38 @@ def _read(db: Session, conv) -> ConversationRead:
     )
 
 
-def _plan_read(row) -> PlanRead:
+def _plan_read(db: Session, row) -> PlanRead:
     try:
-        steps = json.loads(row.steps_json or "[]").get("steps", [])
+        payload = json.loads(row.steps_json or "{}")
     except (json.JSONDecodeError, AttributeError):
-        steps = []
-    return PlanRead(id=row.id, conversation_id=row.conversation_id, version=row.version,
-                    status=row.status, summary=row.summary, created_at=row.created_at, steps=steps)
+        payload = {}
+    steps = payload.get("steps", []) if isinstance(payload, dict) else []
+    try:
+        plan = TaskPlan.model_validate_json(row.steps_json)
+    except (ValueError, TypeError):
+        plan = None
+    reasons = plan.explicit_approval_reasons() if plan is not None else []
+    return PlanRead(
+        id=row.id, conversation_id=row.conversation_id, version=row.version,
+        status=row.status, summary=row.summary,
+        goal=plan.goal if plan else "", scope=plan.scope if plan else "",
+        assumptions=plan.assumptions if plan else [], risks=plan.risks if plan else [],
+        external_actions=plan.external_actions if plan else [],
+        requires_approval=bool(reasons), approval_reasons=reasons,
+        created_at=row.created_at, steps=steps)
 
 
 @router.post("/conversations", response_model=ConversationRead, status_code=201)
 def create(payload: ConversationCreate, db: Session = Depends(get_db)):
     if not payload.first_message.strip():
         raise HTTPException(status_code=422, detail="first_message cannot be blank")
-    conv = create_conversation(db, payload.first_message, channel=payload.channel)
+    if payload.client_message_id:
+        existing = (db.query(Message)
+                    .filter(Message.external_id == payload.client_message_id).first())
+        if existing is not None:
+            return _read(db, get_conversation(db, existing.conversation_id))
+    conv = create_conversation(db, payload.first_message, channel=payload.channel,
+                               external_id=payload.client_message_id)
     return _read(db, conv)
 
 
@@ -77,9 +96,16 @@ def post_message(conversation_id: int, payload: MessageCreate, db: Session = Dep
     anchor = db.get(Task, conv.anchor_task_id)
     if anchor is None or anchor.status != "clarifying":
         raise HTTPException(status_code=409, detail="The conversation is not in a clarifying state")
-    msg = add_message(db, conv.id, payload.content.strip(), role="user")
+    msg = add_message(db, conv.id, payload.content.strip(), role="user",
+                      external_id=payload.client_message_id)
     if msg is None:
-        raise HTTPException(status_code=500, detail="Message could not be stored")
+        # Idempotent replay: the client retried a message that is already stored.
+        existing = (db.query(Message)
+                    .filter(Message.conversation_id == conv.id,
+                            Message.external_id == payload.client_message_id).first())
+        if existing is None:
+            raise HTTPException(status_code=500, detail="Message could not be stored")
+        return existing
     return msg
 
 
@@ -90,8 +116,8 @@ def plan(conversation_id: int, db: Session = Depends(get_db)):
     except ConversationError as e:
         raise _http(e)
     current = get_plan_row(db, conv.id, conv.current_plan_version) if conv.current_plan_version else None
-    return {"current": _plan_read(current).model_dump() if current else None,
-            "history": [_plan_read(row).model_dump() for row in plan_history(db, conv.id)]}
+    return {"current": _plan_read(db, current).model_dump() if current else None,
+            "history": [_plan_read(db, row).model_dump() for row in plan_history(db, conv.id)]}
 
 
 @router.post("/conversations/{conversation_id}/approve", response_model=PlanRead)
@@ -100,7 +126,7 @@ def approve(conversation_id: int, payload: ApproveRequest, db: Session = Depends
         row = approve_plan(db, conversation_id, payload.plan_version)
     except ConversationError as e:
         raise _http(e)
-    return _plan_read(row)
+    return _plan_read(db, row)
 
 
 @router.post("/conversations/{conversation_id}/revise", response_model=ConversationRead)

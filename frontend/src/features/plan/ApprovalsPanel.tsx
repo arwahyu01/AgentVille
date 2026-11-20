@@ -4,9 +4,10 @@ import { api } from '../../lib/api'
 import type { Agent, Conversation, Task } from '../../types'
 
 /**
- * The only place a human decision is needed. Everything else in the office runs on its own,
- * so this panel stays empty unless a plan is genuinely blocked:
- *  - a proposal that predates automatic approval (legacy `awaiting_approval`),
+ * Safety gates and recovery status. Ordinary local plans start automatically; this panel is
+ * only a checkpoint for high-risk work or a run whose bounded recovery options were exhausted:
+ *  - a plan with external/high-risk actions waiting for explicit approval,
+ *  - a legacy proposal that predates automatic approval,
  *  - a run the leader could not finish (merge conflict, exhausted retries),
  *  - a step whose owner failed and needs another pair of hands.
  */
@@ -57,8 +58,8 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
     <section className="panel approvals-panel" data-testid="approvals">
       <div className="panel-heading">
         <div>
-          <h2><ShieldCheck size={15} /> Butuh Persetujuan</h2>
-          <p>Hanya item yang benar-benar butuh keputusanmu muncul di sini.</p>
+          <h2><ShieldCheck size={15} /> Perlu perhatian</h2>
+          <p>Persetujuan hanya untuk perubahan berisiko; pekerjaan lain berjalan otomatis.</p>
         </div>
         <span className={`approvals-count ${items.length ? 'has-items' : ''}`}>{items.length}</span>
       </div>
@@ -78,9 +79,9 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
                 <div>
                   <strong>{title}</strong>
                   <span>
-                    {item.kind === 'plan' && `Rencana v${item.conversation.current_plan_version} menunggu keputusan`}
-                    {item.kind === 'failed-run' && 'Pekerjaan berhenti — pimpinan minta arahan'}
-                    {item.kind === 'stuck-step' && `Langkah ${task?.plan_step_index ?? '?'} macet, perlu pengganti`}
+                    {item.kind === 'plan' && `Rencana v${item.conversation.current_plan_version} menunggu persetujuan risiko`}
+                    {item.kind === 'failed-run' && 'Pemulihan otomatis habis; hasil sementara dan temuan tersedia'}
+                    {item.kind === 'stuck-step' && `Langkah ${task?.plan_step_index ?? '?'} berhenti setelah upaya pemulihan`}
                   </span>
                 </div>
               </div>
@@ -139,7 +140,7 @@ export default function ApprovalsPanel({ tasks, conversations, agents, onAction,
         })}
       </ul>
       {items.some((item) => item.kind === 'failed-run') && (
-        <p className="approvals-hint">Catatan yang kamu tulis dipakai saat menekan Revisi.</p>
+        <p className="approvals-hint">Revisi dan QC ulang tersedia sebagai tindakan opsional; hasil terakhir tetap bisa dibuka.</p>
       )}
     </section>
   )

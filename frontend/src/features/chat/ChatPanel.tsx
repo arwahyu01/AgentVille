@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { MessageSquare, Send } from 'lucide-react'
-import { api } from '../../lib/api'
+import { api, clientId } from '../../lib/api'
 import type { ChatMessage, Conversation } from '../../types'
 
 const STATUS_HINTS: Record<string, string> = {
   clarifying: 'Pimpinan akan membalas sebentar lagi…',
-  awaiting_approval: 'Rencana lama menunggu keputusanmu — setujui di panel Butuh Persetujuan.',
+  awaiting_approval: 'Rencana ini berisi perubahan berisiko. Baca alasannya di tab Perlu aksi.',
   approved: 'Rencana disetujui — pekerjaan masuk antrean.',
   queued: 'Menunggu giliran dieksekusi.',
   running: 'Para spesialis sedang bekerja.',
   reviewing: 'QC sedang memeriksa hasil.',
   completed: 'Selesai. Kirim permintaan baru untuk pekerjaan lain.',
-  failed: 'Pekerjaan berhenti — lihat panel Butuh Persetujuan.',
+  failed: 'Pemulihan otomatis habis. Hasil sementara tersedia lewat tombol Lihat hasil.',
   cancelled: 'Dibatalkan.',
 }
 
@@ -45,7 +45,7 @@ export default function ChatPanel({ conversation, refreshKey, onSent, onError }:
     if (conversation == null || !draft.trim()) return
     setBusy(true)
     try {
-      await api.postConversationMessage(conversation.id, draft.trim())
+      await api.postConversationMessage(conversation.id, draft.trim(), clientId())
       setDraft('')
       onSent()
     } catch (e) {
@@ -59,7 +59,7 @@ export default function ChatPanel({ conversation, refreshKey, onSent, onError }:
     return (
       <div className="chat-panel empty" data-testid="chat-panel">
         <MessageSquare size={22} />
-        <p>No request selected. Start one to talk with the Coordinator.</p>
+        <p>Belum ada percakapan. Kirim permintaan lewat bilah di atas untuk berbicara dengan Coordinator.</p>
       </div>
     )
   }

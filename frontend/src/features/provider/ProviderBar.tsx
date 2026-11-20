@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BrainCircuit } from 'lucide-react'
+import { BrainCircuit, ShieldCheck } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { AiConfig, ProviderName } from '../../types'
 
@@ -89,6 +89,10 @@ export default function ProviderBar({ config, onConfig }: { config: AiConfig | n
                  disabled={busy} onChange={(e) => void patch({ rotate_models_enabled: e.target.checked })} />
           Auto-rotate AI
         </label>
+        <div className="ai-toggle" title="Pekerjaan lokal berjalan otomatis. Aksi eksternal, perubahan destruktif, dan risiko tinggi selalu menunggu persetujuan.">
+          <ShieldCheck size={15} aria-hidden="true" />
+          Gate risiko aktif
+        </div>
         <div className="ai-model-field">
           <span>Rotate max</span>
           <input aria-label="Rotate max" type="number" min={1} max={100} disabled={busy || !(config.rotate_models_enabled ?? true)}

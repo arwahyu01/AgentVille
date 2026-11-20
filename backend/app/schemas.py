@@ -61,6 +61,7 @@ class QcReviewRead(BaseModel):
     verdict: str
     findings: str
     evidence: str
+    criteria_json: str = ""
     artifacts_json: str = ""
     provider: str | None = None
     model: str | None = None
@@ -89,6 +90,8 @@ class TaskResultRead(BaseModel):
     artifact_path: str
     children: list[TaskRead] = []
     plan_steps: list[dict] = []
+    plan_meta: dict = {}
+    failure_reason: str = ""
     qc_reviews: list[QcReviewRead] = []
     diff_path: str = ""
     preview: PreviewRead = Field(default_factory=PreviewRead)
@@ -108,6 +111,7 @@ class AIConfigRead(BaseModel):
     agent_chat_mode: Literal["static", "milestone", "full"] = "static"
     rotate_models_enabled: bool = True
     rotate_models_max: int = 4
+    external_approval_enabled: bool = True
     providers: dict = {}
 
 class AIConfigPatch(BaseModel):
@@ -122,6 +126,7 @@ class AIConfigPatch(BaseModel):
     agent_chat_mode: Literal["static", "milestone", "full"] | None = None
     rotate_models_enabled: bool | None = None
     rotate_models_max: int | None = Field(default=None, ge=1, le=100)
+    external_approval_enabled: bool | None = None
 
 class TaskEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -187,6 +192,9 @@ class ClearTasksResult(BaseModel):
 class ConversationCreate(BaseModel):
     first_message: str = Field(min_length=1, max_length=4000)
     channel: Literal["web", "telegram"] = "web"
+    # Idempotency key supplied by the client so a double-submit returns the same conversation
+    # instead of creating a second one.
+    client_message_id: str | None = Field(default=None, max_length=80)
 
 class ConversationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -202,6 +210,7 @@ class ConversationRead(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
+    client_message_id: str | None = Field(default=None, max_length=80)
 
 class MessageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -219,6 +228,13 @@ class PlanRead(BaseModel):
     version: int
     status: str
     summary: str
+    goal: str = ""
+    scope: str = ""
+    assumptions: list[str] = []
+    risks: list[str] = []
+    external_actions: list[str] = []
+    requires_approval: bool = False
+    approval_reasons: list[str] = []
     created_at: datetime
     steps: list[dict] = []
 

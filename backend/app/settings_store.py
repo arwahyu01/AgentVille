@@ -55,6 +55,10 @@ def rotate_models_max(db: Session) -> int:
     """How many other engines a single call may try before giving up."""
     return _int_setting(db, "rotate_models_max", 4, 1, 100)
 
+def external_approval_enabled(db: Session) -> bool:
+    """Compatibility accessor; safety approval is mandatory and cannot be disabled."""
+    return True
+
 def ai_retry_max(db: Session) -> int:
     try:
         return max(0, min(3, int(get_setting(db, "ai_retry_max"))))

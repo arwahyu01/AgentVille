@@ -68,9 +68,13 @@ COLUMN_MIGRATIONS = {
         "qc_rerun_requested": "INTEGER DEFAULT 0",
     },
     "qc_reviews": {
+        "criteria_json": "TEXT DEFAULT ''",
         "artifacts_json": "TEXT DEFAULT ''",
         "provider": "TEXT",
         "model": "TEXT",
+    },
+    "messages": {
+        "external_id": "TEXT",
     },
     "task_events": {
         "conversation_id": "INTEGER",
@@ -195,6 +199,15 @@ DEFAULT_SETTINGS = {
     # (free models first) instead of failing the job.
     "rotate_models_enabled": "1",
     "rotate_models_max": "4",
+    # Deploy/publish/message steps must be approved by a human, even though ordinary local
+    # plans still start automatically.
+    "external_approval_enabled": "1",
+    # Daily news drafts: local clock hour, topics, and a bounded item count. The scheduler
+    # only creates a conversation/draft; it never publishes.
+    "news_schedule_enabled": "0",
+    "news_schedule_hour": "7",
+    "news_schedule_topics": "",
+    "news_schedule_max_items": "5",
 }
 
 def seed_settings():

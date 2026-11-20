@@ -58,6 +58,7 @@ export interface AiConfig {
   agent_chat_mode: AgentChatMode
   rotate_models_enabled: boolean
   rotate_models_max: number
+  external_approval_enabled?: boolean
   providers?: Record<ProviderName, ProviderInfo>
 }
 
@@ -90,6 +91,8 @@ export interface PlanStep {
   required?: boolean
   acceptance_criteria?: string[]
   uses_tools?: boolean
+  tools?: string[]
+  risk?: 'low' | 'medium' | 'high'
 }
 
 export interface PlanRead {
@@ -98,6 +101,13 @@ export interface PlanRead {
   version: number
   status: string
   summary: string
+  goal?: string
+  scope?: string
+  assumptions?: string[]
+  risks?: string[]
+  external_actions?: string[]
+  requires_approval?: boolean
+  approval_reasons?: string[]
   created_at: string
   steps: PlanStep[]
 }
@@ -140,6 +150,16 @@ export interface TaskResult {
   artifact_path: string
   children: Task[]
   plan_steps?: PlanStep[]
+  plan_meta?: {
+    summary?: string
+    goal?: string
+    scope?: string
+    assumptions?: string[]
+    risks?: string[]
+    external_actions?: string[]
+    acceptance_criteria?: string[]
+  }
+  failure_reason?: string
   qc_reviews?: QcReview[]
   diff_path?: string
   preview?: PreviewInfo
@@ -227,7 +247,86 @@ export interface CharacterChatReply {
 }
 
 /** A Claude Code session reported through the AgentVille HTTP hooks (`scripts/claude_hooks.py`). */
+export interface PublishCredential {
+  id: number
+  name: string
+  api_url: string
+  method: string
+  auth_header: string
+  auth_scheme: string
+  field_map: Record<string, string>
+  headers: Record<string, string>
+  enabled: boolean
+  has_token: boolean
+  created_at: string | null
+}
+
+export interface PublishJob {
+  id: number
+  provider: 'dry24' | 'instagram'
+  title: string
+  credential_id: number | null
+  account_id: number | null
+  status: 'preview' | 'approved' | 'sending' | 'published' | 'failed'
+  error: string
+  approved_by: string
+  preview: Record<string, unknown> | null
+  response: Record<string, unknown> | null
+  created_at: string | null
+  approved_at: string | null
+  published_at: string | null
+}
+
+export interface NewsRunInfo {
+  id: number
+  run_date: string
+  status: string
+  conversation_id: number | null
+  error: string
+  topics: string
+}
+
+export interface PublishStatus {
+  storage: 'dpapi' | 'unavailable'
+  credentials: PublishCredential[]
+  instagram_accounts: { id: number; label: string; external_id: string; status: string }[]
+  jobs: PublishJob[]
+  gate: string
+}
+
+export interface ScheduleStatus {
+  enabled: boolean
+  hour: number
+  topics: string
+  max_items: number
+  runs: NewsRunInfo[]
+}
+
 export type ClaudeSessionStatus = 'idle' | 'working' | 'waiting' | 'completed' | 'failed'
+
+export type IntegrationProvider = 'instagram' | 'youtube' | 'meta_ads'
+
+export interface IntegrationAccount {
+  id: number
+  provider: IntegrationProvider
+  label: string
+  external_id: string
+  status: string
+  scopes: string
+  expires_at: string | null
+  verified_at: string | null
+  has_refresh_token: boolean
+  last_error: string
+  created_at: string | null
+}
+
+export interface IntegrationStatus {
+  configured: Record<IntegrationProvider, boolean>
+  storage: 'dpapi' | 'unavailable'
+  redirect_uri: string
+  accounts: IntegrationAccount[]
+  note: string
+}
 
 export interface ClaudeSessionEvent {
   event: string

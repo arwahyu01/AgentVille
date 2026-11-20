@@ -5,6 +5,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app import chatter
+from app.agent_actions import sanitize_event
 from app.agent_status import sync_agent_status
 from app.models import Agent, Task, TaskEvent
 
@@ -51,7 +52,8 @@ def add_event(db: Session, task_id: int, event_type: str, message: str, *,
         # status change is attributed to the agent that owns the task.
         owner = db.get(Task, task_id)
         agent_id = owner.agent_id if owner is not None else None
-    event = TaskEvent(task_id=task_id, event_type=event_type, message=message,
+    event = TaskEvent(task_id=task_id, event_type=str(event_type)[:32],
+                      message=sanitize_event(message),
                       conversation_id=conversation_id, agent_id=agent_id,
                       provider=provider, model=model, step_index=step_index,
                       actor_agent_id=actor_agent_id, recipient_agent_id=recipient_agent_id,

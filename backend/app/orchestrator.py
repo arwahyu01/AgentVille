@@ -5,10 +5,11 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from app import conversation_service
 from app import task_service
-from app.agent_actions import ActionGate, redact
+from app.agent_actions import ActionGate, redact, sanitize_event
 from app.ai import registry
 from app.ai import fallback as ai_fallback
 from app.ai import rotation as ai_rotation
@@ -32,6 +33,16 @@ from app.tools import repo
 from app.tools.workspace import resolve_root
 
 logger = logging.getLogger("agentville.orchestrator")
+
+# Failures that mean the *engine* is unusable, not the agent's work: a bad model id, a dead
+# or exhausted provider, or an engine that answered nothing at all. Swapping the agent for
+# these repeats the same failure with a different name on the badge.
+ENGINE_FAILURE_HINTS = (
+    "invalid model identifier", "model not found", "no longer available", "end of life",
+    "not found on path", "cli not found", "free usage limit", "quota", "rate limit", "429",
+    "timed out", "produced no output", "no output for", "overloaded", "unauthorized",
+    "forbidden", "401", "402", "403", "502", "503", "504",
+)
 
 __all__ = ["Orchestrator", "VALID_ROLES", "PlanStep", "TaskPlan", "extract_json"]
 
@@ -68,6 +79,16 @@ class Orchestrator(threading.Thread):
         # the same request twice while it is legitimately in flight.
         self._jobs: dict[int, threading.Thread] = {}
         self._jobs_lock = threading.Lock()
+        # Per-step workspace baseline, so a failed coding attempt is never retried or
+        # handed to another engine after it may have written files.
+        self._state_lock = threading.Lock()
+        self._step_baseline: dict[int, str] = {}
+        self._partial_steps: set[int] = set()
+        # Baseline of the files sitting in the application repo root (outside every
+        # workspace). A coding step that writes there — by absolute path or `../..` —
+        # is invisible to the workspace fingerprint, so it is tracked separately and
+        # journaled as an escape instead of being reported as "no-changes".
+        self._root_baseline: dict[int, dict] = {}
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -157,8 +178,29 @@ class Orchestrator(threading.Thread):
 
     def recover_interrupted(self) -> None:
         with SessionLocal() as db:
+            try:
+                ws_root = resolve_root(get_setting(db, "workspace_root") or None)
+            except Exception:  # noqa: BLE001 - recovery must not fail on a bad workspace path
+                ws_root = None
             for task in db.query(Task).filter(Task.status == "running").all():
-                force_transition(db, task, "failed", "Run interrupted by backend restart", "interrupted")
+                note = "Run interrupted by backend restart"
+                if task.parent_id is None:
+                    note += (" — completed steps are kept; resume or QC-rerun instead of "
+                             "repeating the whole request")
+                    ws = ws_root / f"project-{task.id}" if ws_root is not None else None
+                    if ws is not None and ws.exists() and (ws / ".git").exists():
+                        try:
+                            status, _diff = repo.capture_diff(ws)
+                        except Exception:  # noqa: BLE001
+                            status = ""
+                        if status and status != "no-changes":
+                            note += f"; workspace changed before the restart: {status[:200]}"
+                        else:
+                            note += "; workspace was unchanged at restart"
+                    elif ws is not None and ws.exists():
+                        note += "; workspace has files but no git history to compare"
+                force_transition(db, task, "failed", note, "interrupted")
+                release_lease(db, task.id)
 
     def _tick(self, wait: bool = True) -> None:
         """One scheduling pass.
@@ -285,42 +327,103 @@ class Orchestrator(threading.Thread):
         with SessionLocal() as db:
             model = ai_model_for(db, ai_provider(db))
             transcript = self._transcript(db, conversation_id)
-        persona = dataclasses.replace(COORDINATOR, model=model)
-        prompt = (f"Conversation so far:\n{transcript}\n\n"
-                  "Respond to the latest user message with an ask or a proposal.")[:6000]
-        result = provider.run(persona, prompt, timeout_s=timeout_s,
-                              should_cancel=lambda: self._cancelled(anchor_id))
-        self._log_switches(provider, anchor_id, conversation_id=conversation_id)
-        if self._cancelled(anchor_id):
-            return
-        payload = extract_json(result.text) if result.ok else None
-        action = payload.get("action") if payload else None
-        if action == "ask" and str(payload.get("question", "")).strip():
-            self._store_assistant_reply(conversation_id, anchor_id, "coordinator_question",
-                                        str(payload["question"]).strip()[:2000])
-            return
-        if action == "propose":
             try:
-                plan = TaskPlan.model_validate(payload.get("plan") or payload)
-                with SessionLocal() as db:
-                    row = conversation_service.propose_plan(db, conversation_id, plan,
-                                                            summary=str(payload.get("summary", "")))
-                    conv = conversation_service.get_conversation(db, conversation_id)
-                    # The whole plan travels with the proposal: the transcript and Telegram
-                    # show scope, owners, order, criteria and the version to approve, and the
-                    # outbox splits it at paragraph boundaries if it exceeds one message.
-                    text = conversation_service.proposal_message(db, conv, row, plan)
-                self._store_assistant_reply(conversation_id, anchor_id, "plan_proposed", text)
+                ws_root = resolve_root(get_setting(db, "workspace_root") or None)
+                workspace = ws_root / f"project-{anchor_id}"
+            except Exception:  # noqa: BLE001 - a bad workspace setting must not block planning
+                workspace = None
+        persona = dataclasses.replace(COORDINATOR, model=model)
+        # Naming the workspace is not cosmetic: without it the Coordinator resolved
+        # "workspace proyek ini" to the AgentVille application directory and wrote plan
+        # instructions pointing there, so steps escaped the approved workspace.
+        workspace_note = (
+            f"Project workspace for this request (the ONLY place plan steps may create or "
+            f"edit files): {workspace}\n"
+            "Never write into the AgentVille application directory itself. Use relative "
+            "paths in step instructions; the engine already runs inside that workspace.\n\n"
+            if workspace is not None else "")
+        base_prompt = (f"Conversation so far:\n{transcript}\n\n"
+                       f"{workspace_note}"
+                       "Respond with a safe-default plan unless a critical missing input has no "
+                       "safe assumption. Return an ask or a proposal as JSON only.")[:6000]
+        prompt = base_prompt
+        retry_limit = self._retry_limit()
+        last_error = ""
+        for attempt in range(retry_limit + 1):
+            try:
+                result = provider.run(persona, prompt, timeout_s=timeout_s,
+                                      should_cancel=lambda: self._cancelled(anchor_id))
+            except Exception as exc:  # noqa: BLE001 - a broken CLI must not strand the conversation
+                logger.exception("Coordinator provider call failed for task %s", anchor_id)
+                result = ProviderResult(ok=False, error=f"provider exception: {exc}")
+            self._log_switches(provider, anchor_id, conversation_id=conversation_id)
+            if self._cancelled(anchor_id):
                 return
-            except (ValueError, conversation_service.ConversationError) as e:
-                self._store_assistant_reply(conversation_id, anchor_id, "plan_error",
-                                            f"I could not turn that into a valid plan ({e}). "
-                                            "Tell me a bit more and I will redraft.")
-                return
-        reason = result.error if not result.ok else "coordinator reply was not a valid ask/propose JSON"
-        self._store_assistant_reply(conversation_id, anchor_id, "coordinator_error",
-                                    f"(Coordinator error: {str(reason)[:400]}. "
-                                    "Send another message to retry.)")
+            if not result.ok:
+                last_error = result.error or "provider did not return a result"
+            else:
+                payload = extract_json(result.text)
+                action = payload.get("action") if payload else None
+                if action == "ask" and str(payload.get("question", "")).strip():
+                    self._store_assistant_reply(conversation_id, anchor_id, "coordinator_question",
+                                                str(payload["question"]).strip()[:2000])
+                    return
+                if action == "propose":
+                    try:
+                        raw_plan = payload.get("plan")
+                        plan_payload = dict(raw_plan) if isinstance(raw_plan, dict) else dict(payload)
+                        # Accept plan metadata at either level without dropping declared risks.
+                        for key in ("goal", "scope", "assumptions", "risks", "external_actions",
+                                    "acceptance_criteria", "summary"):
+                            if key in payload and key not in plan_payload and payload.get(key) not in (None, "", []):
+                                plan_payload[key] = payload[key]
+                        plan = TaskPlan.model_validate(plan_payload)
+                        plan.validate_for_conversation()
+                        with SessionLocal() as db:
+                            plan.validate_for_budget(plan_max_steps(db), plan_max_depth(db))
+                    except ValueError as exc:
+                        last_error = f"invalid plan: {exc}"
+                    else:
+                        try:
+                            with SessionLocal() as db:
+                                row = conversation_service.propose_plan(
+                                    db, conversation_id, plan,
+                                    summary=str(payload.get("summary", "")))
+                                conv = conversation_service.get_conversation(db, conversation_id)
+                                text = conversation_service.proposal_message(db, conv, row, plan)
+                        except conversation_service.ConversationError as exc:
+                            self._store_assistant_reply(
+                                conversation_id, anchor_id, "plan_error",
+                                f"Rencana tidak bisa dimulai karena status tugas berubah: {str(exc)[:400]}. "
+                                "Tidak ada pekerjaan tambahan yang dijalankan.")
+                            return
+                        self._store_assistant_reply(conversation_id, anchor_id, "plan_proposed", text)
+                        return
+                else:
+                    last_error = "coordinator reply was not a valid ask/propose JSON object"
+
+            if attempt < retry_limit:
+                self._journal_retry(anchor_id, attempt + 1, last_error)
+                if not result.ok:
+                    # Rebuild the finite rotation chain after an exhausted/retired model.
+                    provider = self._provider()
+                    prompt = base_prompt
+                else:
+                    prompt = (f"{base_prompt}\n\nSELF-CORRECTION: The previous response was "
+                              f"not executable: {redact(last_error, 400)}. Correct the JSON and plan "
+                              "internally; use safe defaults and do not ask the user to approve.")[:6500]
+                continue
+
+            if result.ok:
+                message = (f"Rencana belum bisa dijalankan setelah {attempt + 1} percobaan otomatis. "
+                           f"Penyebab: {redact(last_error, 400)}. Belum ada perubahan yang dijalankan.")
+                event = "plan_error"
+            else:
+                message = (f"Koordinator belum bisa menghubungi model setelah pemulihan otomatis. "
+                           f"Penyebab: {redact(last_error, 400)}. Belum ada pekerjaan yang dijalankan.")
+                event = "coordinator_error"
+            self._store_assistant_reply(conversation_id, anchor_id, event, message)
+            return
 
     # -- execution -----------------------------------------------------------
 
@@ -330,16 +433,39 @@ class Orchestrator(threading.Thread):
             return parent is not None and parent.status == "cancelled"
 
     def _call(self, provider: AIProvider, persona: Persona, prompt: str, timeout_s: int,
-              parent_id: int) -> ProviderResult:
+              parent_id: int, retry_guard=None) -> ProviderResult:
+        """One provider call with a *bounded, journaled* retry.
+
+        `retry_guard` lets a coding step veto the retry when the previous attempt may have
+        changed the workspace; the guard is evaluated before every new attempt."""
         result = provider.run(persona, prompt, timeout_s=timeout_s,
                               should_cancel=lambda: self._cancelled(parent_id))
-        if not result.ok and result.error != "Cancelled" and "not found" not in (result.error or ""):
+        attempts = 0
+        limit = self._retry_limit()
+        while (not result.ok and attempts < limit
+               and result.error != "Cancelled" and "not found" not in (result.error or "")
+               and (retry_guard is None or retry_guard())):
+            attempts += 1
+            self._journal_retry(parent_id, attempts, result.error)
             time.sleep(self.RETRY_BACKOFF_S)
             if self._cancelled(parent_id):
                 return result
             result = provider.run(persona, prompt, timeout_s=timeout_s,
                                   should_cancel=lambda: self._cancelled(parent_id))
         return result
+
+    def _retry_limit(self) -> int:
+        with SessionLocal() as db:
+            return ai_retry_max(db)
+
+    def _journal_retry(self, task_id: int, attempt: int, error: str | None) -> None:
+        try:
+            with self._db_lock, SessionLocal() as db:
+                add_event(db, task_id, "provider_retry",
+                          f"Attempt {attempt} failed ({redact(error, 300)}); retrying")
+                db.commit()
+        except Exception:  # noqa: BLE001 - the journal must never break the run
+            logger.warning("could not journal a provider retry", exc_info=True)
 
     def _persona(self, role: str | None, name: str | None, model: str,
                  coding: bool = False, workspace: str | None = None) -> Persona:
@@ -506,18 +632,37 @@ class Orchestrator(threading.Thread):
     def _escalate_step(self, step: PlanStep, index: int, child_id: int, anchor_id: int,
                        conversation_id: int, cfg: dict, workspace, timeout_s: int,
                        instruction: str, outputs: dict[int, str],
-                       reason: str) -> ProviderResult | None:
+                       reason: str, failed_provider: str = "",
+                       failed_model: str = "") -> ProviderResult | None:
         """A specialist that cannot finish says so to the leader (`needs_help`); the leader
         diagnoses, picks a replacement from the roster and hands the step over, and the
         replacement retries immediately. Bounded to one rescue per step so a broken provider
-        still fails the plan instead of looping forever."""
+        still fails the plan instead of looping forever.
+
+        Engine faults are repaired *as engine faults*. Reassigning an agent used to re-run
+        the exact same broken provider/model, so the office dutifully failed twice with two
+        different names on the badge.
+        """
+        engine_fault = any(hint in (reason or "").lower() for hint in ENGINE_FAILURE_HINTS)
+        switched = None
+        if engine_fault:
+            switched = self._next_usable_engine(cfg, failed_provider, failed_model,
+                                                coding=step.uses_tools)
         with self._db_lock, SessionLocal() as db:
             child = db.get(Task, child_id)
             owner = db.get(Agent, child.agent_id) if child is not None and child.agent_id else None
             leader = self._leader(db)
+            with self._state_lock:
+                partial = child_id in self._partial_steps
             say(db, child_id, owner,
                 f"Lapor, langkah {index} ({step.title}) macet: {redact(reason, 220)}. "
-                "Saya butuh arahan untuk melanjutkan.",
+                + ("Perubahan parsial sudah ada; agent pengganti harus memeriksa workspace "
+                   "dan melanjutkan dari kondisi itu."
+                   if partial and step.uses_tools else
+                   ("Engine-nya yang bermasalah, bukan pekerjaannya: saya pindahkan langkah "
+                    "ini ke engine lain lalu ulangi."
+                    if switched else
+                    "Saya sedang mencoba pemulihan otomatis dengan agent pengganti.")),
                 recipient=leader, conversation_id=conversation_id,
                 event_type="needs_help", step_index=index)
             if "merge conflict" in reason.lower():
@@ -530,12 +675,27 @@ class Orchestrator(threading.Thread):
                     conversation_id=conversation_id, event_type="needs_help", step_index=index)
                 db.commit()
                 return None
+            if engine_fault and switched is None:
+                say(db, anchor_id, leader,
+                    f"Langkah {index} gagal karena engine tidak bisa dipakai "
+                    f"({redact(reason, 180)}) dan tidak ada engine lain yang terpasang. "
+                    "Saya berhenti di sini alih-alih mengulang percobaan yang pasti gagal.",
+                    conversation_id=conversation_id, event_type="agent_chat", step_index=index)
+                db.commit()
+                return None
+            if switched is not None:
+                add_event(db, child_id, "engine_switched",
+                          f"Diagnosa: {failed_provider or cfg['provider']}/{failed_model or '?'} "
+                          f"tidak bisa dipakai ({redact(reason, 160)}); langkah diulang di "
+                          f"{switched[0]}/{switched[1]}",
+                          conversation_id=conversation_id, step_index=index)
             candidates = self._rescue_candidates(db, step, owner.id if owner else None)
             replacement = candidates[0] if candidates else None
             if replacement is None:
                 say(db, anchor_id, leader,
                     f"Langkah {index} tidak bisa diselamatkan: {redact(reason, 180)}. "
-                    "Tidak ada pengganti di kantor ini, jadi saya hentikan permintaan.",
+                    "Semua pemulihan otomatis sudah habis. Saya hentikan langkah ini dan "
+                    "menyimpan hasil parsial yang tersedia untuk ditinjau.",
                     conversation_id=conversation_id, event_type="agent_chat", step_index=index)
                 db.commit()
                 return None
@@ -557,14 +717,39 @@ class Orchestrator(threading.Thread):
                       step_index=index, actor_agent_id=replacement.id)
             db.commit()
         persona = self._persona(replacement.role, replacement.name,
-                                self._step_model(cfg, step.uses_tools),
+                                switched[1] if switched else self._step_model(cfg, step.uses_tools),
                                 coding=step.uses_tools and workspace is not None,
                                 workspace=str(workspace) if workspace is not None else None)
         extra = (f"Kamu mengambil alih langkah ini dari rekan yang gagal: {redact(reason, 300)}. "
-                 "Kerjakan sampai tuntas dan laporkan hasilnya.")
+                 + (f"Engine sebelumnya tidak bisa dipakai; kamu berjalan di {switched[0]}/"
+                    f"{switched[1]}. " if switched else "")
+                 + "Periksa workspace dan artefak yang sudah ada terlebih dahulu. Jika ada perubahan "
+                   "parsial, pertahankan bagian yang benar dan lanjutkan dari kondisi saat ini; "
+                   "jangan mengulang dari nol atau menimpa pekerjaan yang tidak terkait. "
+                   "Kerjakan sampai tuntas dan laporkan hasil yang benar-benar tersedia.")
         return self._run_specialist_step(step, index, child_id, anchor_id, persona, outputs,
                                          instruction, timeout_s, cfg, workspace,
-                                         conversation_id, extra_prompt=extra)
+                                         conversation_id, extra_prompt=extra,
+                                         engine_override=switched)
+
+    def _next_usable_engine(self, cfg: dict, failed_provider: str, failed_model: str,
+                            coding: bool) -> tuple[str, str] | None:
+        """First installed provider, other than the pair that just failed, with a model its
+        CLI actually accepts. This is the diagnosis step of a self-repair: change the thing
+        that broke, then retry — not the agent's name."""
+        avail = registry.availability()
+        order = [cfg["provider"]] + [n for n in registry.PROVIDERS if n != cfg["provider"]]
+        for name in order:
+            if not avail.get(name, {}).get("available"):
+                continue
+            preferred = cfg["coding_models"].get(name, cfg["text_model"])
+            model = registry.resolve_model(name, preferred, cfg["text_model"])
+            if not model:
+                continue
+            if name == failed_provider and model == failed_model:
+                continue
+            return name, model
+        return None
 
     # -- conversation execution ----------------------------------------------
 
@@ -585,52 +770,85 @@ class Orchestrator(threading.Thread):
                 "workspace_root": get_setting(db, "workspace_root"),
             }
 
-    def _step_provider(self, cfg: dict, coding: bool) -> tuple[AIProvider | None, str, str, AIProvider | None, str]:
-        """Returns (primary, provider_name, model, alternate_or_None, error_or_empty)."""
+    def _step_provider(self, cfg: dict, coding: bool
+                       ) -> tuple[AIProvider | None, str, str, AIProvider | None, str, str]:
+        """Returns (primary, provider_name, model, alternate, error, alternate_model).
+
+        `alternate_model` is the alternate engine's *own* model. Handing opencode's
+        `vendor/model` id to qodercli/claude is rejected outright, so every fallback used to
+        die with "Invalid model identifier" before doing any work.
+        """
         if self._injected_provider is not None:
             name = getattr(self._injected_provider, "name", cfg["provider"])
             coding_model = cfg["coding_models"].get(name, cfg["text_model"])
             return (self._injected_provider, name,
-                    coding_model if coding else cfg["text_model"], None, "")
+                    coding_model if coding else cfg["text_model"], None, "", "")
         avail = registry.availability()
         if coding:
             name, _cls = registry.coding_provider(cfg["provider"])
             if name is None or not avail.get(name, {}).get("available"):
                 return (None, cfg["provider"], cfg["coding_models"].get(cfg["provider"], ""), None,
                         "coding steps need an installed CLI with coding support (opencode, qodercli or claude) — "
-                        "install one, or edit the step to run without tools")
-            model = cfg["coding_models"].get(name, "")
+                        "install one, or edit the step to run without tools", "")
+            model = registry.resolve_model(name, cfg["coding_models"].get(name, ""),
+                                           cfg["text_model"])
             alternate = None
+            alternate_model = ""
             if cfg["fallback"]:
                 other = next((n for n in registry.PROVIDERS
                               if n != name and avail.get(n, {}).get("available")), None)
-                alternate = registry.make_provider(other) if other else None
+                if other:
+                    alternate_model = registry.resolve_model(
+                        other, cfg["coding_models"].get(other, ""), cfg["text_model"])
+                    # No model this engine accepts means no fallback: launching it anyway
+                    # guarantees an instant, misleading "invalid model" failure.
+                    if alternate_model:
+                        alternate = registry.make_provider(other)
             primary = registry.make_provider(name)
             if cfg["rotate"]:
                 primary = self._rotating(primary, name, model)
-            return (primary, name, model, alternate, "")
+            return (primary, name, model, alternate, "", alternate_model)
         name = cfg["provider"]
         alternate = None
+        alternate_model = ""
         if cfg["fallback"]:
             # Prefer another provider whose CLI is actually installed; otherwise keep the old
             # opencode <-> qoder pairing so the failure message stays actionable.
-            avail = registry.availability()
             other = next((n for n in registry.PROVIDERS if n != name and avail.get(n, {}).get("available")),
                          "qoder" if name == "opencode" else "opencode")
-            alternate = registry.make_provider(other)
+            alternate_model = registry.resolve_model(
+                other, cfg["coding_models"].get(other, ""), cfg["text_model"])
+            if alternate_model:
+                alternate = registry.make_provider(other)
         primary = registry.make_provider(name)
         if cfg["rotate"]:
             primary = self._rotating(primary, name, cfg["text_model"])
-        return (primary, name, cfg["text_model"], alternate, "")
+        return (primary, name, cfg["text_model"], alternate, "", alternate_model)
 
     def _run_specialist(self, primary: AIProvider, alternate: AIProvider | None, persona: Persona,
                         prompt: str, timeout_s: int, anchor_id: int,
-                        diff_probe=None) -> ProviderResult:
+                        diff_probe=None, retry_guard=None,
+                        alternate_model: str = "") -> ProviderResult:
         if alternate is None:
-            return self._call(primary, persona, prompt, timeout_s, anchor_id)
+            return self._call(primary, persona, prompt, timeout_s, anchor_id,
+                              retry_guard=retry_guard)
+        alt_persona = persona
+        if alternate_model and alternate_model != persona.model:
+            alt_persona = dataclasses.replace(persona, model=alternate_model)
         first, second = ai_fallback.run_with_fallback(
             primary, alternate, persona, prompt, timeout_s=timeout_s,
-            should_cancel=lambda: self._cancelled(anchor_id), diff_probe=diff_probe)
+            should_cancel=lambda: self._cancelled(anchor_id), diff_probe=diff_probe,
+            alternate_persona=alt_persona)
+        if second is not None:
+            # Journal the primary failure *before* the final verdict, otherwise the feed
+            # shows only the last error and the real cause disappears. This is exactly how
+            # "opencode timed out" turned into a mysterious "Invalid model identifier".
+            with self._db_lock, SessionLocal() as db:
+                add_event(db, anchor_id, "provider_fallback",
+                          f"{getattr(primary, 'name', 'engine')}/{persona.model or '?'} gagal: "
+                          f"{redact(first.error, 200)} → dicoba "
+                          f"{getattr(alternate, 'name', 'engine')}/{alt_persona.model or '?'}")
+                db.commit()
         return second if second is not None else first
 
     def _execute_conversation(self, anchor_id: int, timeout_s: int) -> None:
@@ -660,6 +878,11 @@ class Orchestrator(threading.Thread):
             anchor.plan_json = plan_row.steps_json
 
             children = db.query(Task).filter(Task.parent_id == anchor_id).order_by(Task.id).all()
+            # A revised plan materialises a new generation of child rows; older generations are
+            # cancelled but still stored. Execute only the newest len(plan.steps) rows so a
+            # revision never runs (or resumes) the previous plan's steps.
+            if len(children) > len(plan.steps):
+                children = children[-len(plan.steps):]
             created_here = False
             if not children:
                 created_here = True
@@ -743,7 +966,21 @@ class Orchestrator(threading.Thread):
 
         outputs: dict[int, str] = {}
         completed: set[int] = set()
-        remaining: set[int] = set(range(len(plan.steps)))
+        with SessionLocal() as db:
+            # A resumed request keeps the work that already finished. Re-running a completed
+            # step would repeat file edits that were already delivered and verified. Only the
+            # current generation of step rows counts (see the revision trim above).
+            for child in db.query(Task).filter(Task.id.in_(child_ids)).all():
+                index = child_ids.index(child.id)
+                if child.status == "completed":
+                    outputs[index] = child.result or ""
+                    completed.add(index)
+            if completed:
+                add_event(db, anchor_id, "resume_skipped_steps",
+                          f"Resume keeps completed steps {sorted(completed)}; only unfinished "
+                          "steps will run again", conversation_id=conv.id)
+                db.commit()
+        remaining: set[int] = set(range(len(plan.steps))) - completed
         with SessionLocal() as db:
             concurrency = max_concurrency(db)
             lease = lease_seconds(db)
@@ -767,12 +1004,18 @@ class Orchestrator(threading.Thread):
             for i in ready:
                 result = outcomes[i]
                 if not result.ok:
+                    if self._cancelled(anchor_id) or (result.error or "") == "Cancelled":
+                        # A stop request is a decision, not a fault to repair.
+                        self._cancel_remaining(child_ids)
+                        return
                     # The specialist reports the blocker to the leader instead of the plan
-                    # dying silently: the leader finds a replacement and the step retries.
+                    # dying silently: the leader diagnoses it, fixes the engine if the engine
+                    # was the problem, and only then hands the step to a replacement.
                     reason = f"Step {i} failed: {str(result.error)[:300]}"
                     rescued = self._escalate_step(
                         plan.steps[i], i, child_ids[i], anchor_id, conv.id, cfg, base_ws,
-                        timeout_s, instruction, outputs, reason)
+                        timeout_s, instruction, outputs, reason,
+                        failed_provider=result.provider, failed_model=result.model)
                     if rescued is None or not rescued.ok:
                         detail = reason if rescued is None else \
                             f"Step {i} failed again after reassignment: {str(rescued.error)[:300]}"
@@ -783,6 +1026,19 @@ class Orchestrator(threading.Thread):
                 completed.add(i)
                 with SessionLocal() as db:
                     child = db.get(Task, child_ids[i])
+                    if child is not None:
+                        # The wave just ran on worker threads that committed this step's
+                        # own transitions. Without an explicit refresh this session can
+                        # answer from an older SQLite snapshot ("queued" instead of
+                        # "running"), and the valid `running -> completed` transition is
+                        # then rejected — failing a request whose work actually succeeded.
+                        db.refresh(child)
+                        if child.status in ("pending", "queued"):
+                            # Only a stale read can show a pre-step state here: the
+                            # provider already returned ok for this step. Recover the
+                            # state (journaled) instead of aborting the whole request.
+                            force_transition(db, child, "running",
+                                             "Step started (state recovered after wave)")
                     add_event(db, child.id, "step_completed",
                               f"Step {i} done in {result.latency_s:.1f}s",
                               conversation_id=conv.id, agent_id=child.agent_id,
@@ -1011,28 +1267,61 @@ class Orchestrator(threading.Thread):
     def _run_specialist_step(self, step: PlanStep, index: int, child_id: int, anchor_id: int,
                              persona: Persona, outputs: dict[int, str], instruction: str,
                              timeout_s: int, cfg: dict, workspace, conversation_id: int,
-                             extra_prompt: str = "") -> ProviderResult | None:
-        provider, provider_name, model, alternate, error = self._step_provider(cfg, step.uses_tools)
+                             extra_prompt: str = "",
+                             engine_override: tuple[str, str] | None = None) -> ProviderResult | None:
+        if engine_override is not None:
+            # A diagnosed engine fault: run on the engine the leader chose, not on the one
+            # that just proved it cannot work.
+            ov_name, ov_model = engine_override
+            provider = registry.make_provider(ov_name)
+            provider_name, model, alternate, error, alternate_model = (
+                ov_name, ov_model, None, "", "")
+        else:
+            (provider, provider_name, model, alternate, error,
+             alternate_model) = self._step_provider(cfg, step.uses_tools)
         if model and persona.model != model:
             persona = dataclasses.replace(persona, model=model)
+        if step.uses_tools and step.tools and tuple(step.tools) != persona.tools:
+            # Only the tools the plan declared; providers that support an allowlist pass it
+            # through to the CLI instead of granting the whole default set.
+            persona = dataclasses.replace(persona, tools=tuple(step.tools))
+        resumed = False
         with self._db_lock, SessionLocal() as db:
             child = db.get(Task, child_id)
-            if child.status == "pending":
-                transition(db, child, "queued", "Step queued (approved plan)", conversation_id=conversation_id)
+            resumed = child.status == "failed"
+            if child.status in ("pending", "failed"):
+                transition(db, child, "queued", "Step queued (approved plan / resume)",
+                           conversation_id=conversation_id)
             if child.status == "queued":
                 transition(db, child, "running", "Step started", conversation_id=conversation_id)
+            if resumed:
+                add_event(db, child.id, "step_resumed",
+                          f"Step {index} resumed after a previous failure; existing workspace "
+                          "files are inspected before changing them",
+                          conversation_id=conversation_id, step_index=index)
             step_agent_id = child.agent_id
             add_event(db, anchor_id, "step_started", f"Step {index} ({step.agent_role}) on {provider_name}",
                       conversation_id=conversation_id, agent_id=child.agent_id,
                       provider=provider_name, model=model, step_index=index)
             if step.uses_tools and workspace is not None:
                 pre_status, _pre = repo.capture_diff(workspace)
+                baseline = repo.workspace_fingerprint(workspace)
+                with self._state_lock:
+                    self._step_baseline[child_id] = baseline
+                    # Files outside every workspace (the application repo root) are tracked
+                    # separately: the CLI is only *conventionally* scoped, so a step that
+                    # writes there must not be reported as "no-changes".
+                    self._root_baseline[child_id] = repo.root_escape_snapshot(
+                        task_service.PROJECT_ROOT)
                 add_event(db, child.id, "workspace_before",
                           f"Workspace before step: {pre_status[:200] or 'clean'}",
                           conversation_id=conversation_id, step_index=index,
                           provider=provider_name, model=model)
             db.commit()
         if provider is None:
+            with self._state_lock:
+                self._step_baseline.pop(child_id, None)
+                self._root_baseline.pop(child_id, None)
             return ProviderResult(ok=False, error=error)
         # Providers that can observe their own tool calls report them live; the journal then says
         # what the agent is reading/writing/running instead of only "step started".
@@ -1044,17 +1333,74 @@ class Orchestrator(threading.Thread):
             context = f"{instruction}\n\nEarlier results you must use:\n{prior}"[:4000]
         criteria = "\n".join(f"- {c}" for c in step.acceptance_criteria)
         prompt = f"{step.instruction}\n\nContext:\n{context}"
+        if step.uses_tools and workspace is not None:
+            prompt = (
+                f"AUTHORITATIVE TASK WORKSPACE (absolute path): {Path(workspace).resolve()}\n"
+                "All files for this task must be read or written inside that exact directory. "
+                "Do not substitute the AgentVille application repository or another workspace.\n\n"
+                + prompt
+            )
+        if step.tools:
+            prompt += f"\n\nAllowed tools for this step: {', '.join(step.tools)}"
         if criteria:
             prompt += f"\n\nThis step must satisfy:\n{criteria}"
+        if resumed:
+            prompt += ("\n\nThis is a resume: the workspace may already contain work from the "
+                       "previous attempt. Inspect it first; continue from what exists instead "
+                       "of discarding it.")
         if extra_prompt:
             prompt += f"\n\n{extra_prompt}"
-        diff_probe = (lambda: repo.capture_diff(workspace)) if (workspace and alternate) else None
+        retry_guard = None
+        diff_probe = None
+        if step.uses_tools and workspace is not None:
+            def _changed(cid=child_id, ws=workspace) -> bool:
+                with self._state_lock:
+                    baseline = self._step_baseline.get(cid)
+                return repo.workspace_changed_since(ws, baseline)
+
+            def _retry_guard(cid=child_id, ws=workspace):
+                return not _changed(cid, ws)
+
+            def _diff_probe(cid=child_id, ws=workspace):
+                # Baseline-relative: files left by earlier steps must not look like this
+                # attempt touched the workspace.
+                if not _changed(cid, ws):
+                    return "no-changes", ""
+                return repo.capture_diff(ws)
+
+            retry_guard = _retry_guard
+            if alternate is not None:
+                diff_probe = _diff_probe
         result = self._run_specialist(provider, alternate, persona, prompt[:6000], timeout_s,
-                                      anchor_id, diff_probe)
+                                      anchor_id, diff_probe, retry_guard=retry_guard,
+                                      alternate_model=alternate_model)
+        if self._cancelled(anchor_id) or (result.error or "") == "Cancelled":
+            # The user stopped this request. Report the stop as a stop: no escalation, no
+            # "failed" verdict, and no replacement agent picking up work nobody wants.
+            with self._db_lock, SessionLocal() as db:
+                child = db.get(Task, child_id)
+                if child is not None and child.status in ("pending", "queued", "running"):
+                    force_transition(db, child, "cancelled", "Cancelled by user")
+                add_event(db, child_id, "step_cancelled",
+                          f"Langkah {index} dihentikan oleh user sebelum selesai",
+                          conversation_id=conversation_id, step_index=index)
+                db.commit()
+            with self._state_lock:
+                self._step_baseline.pop(child_id, None)
+                self._root_baseline.pop(child_id, None)
+            return dataclasses.replace(result, ok=False, error="Cancelled")
         if not result.provider:
             result = dataclasses.replace(result, provider=provider_name, model=model)
         self._log_switches(provider, child_id, conversation_id=conversation_id,
                             agent_id=step_agent_id, step_index=index)
+        partial = False
+        if step.uses_tools and workspace is not None:
+            with self._state_lock:
+                baseline = self._step_baseline.pop(child_id, None)
+            partial = not result.ok and repo.workspace_changed_since(workspace, baseline)
+            if result.ok:
+                with self._state_lock:
+                    self._partial_steps.discard(child_id)
         with self._db_lock, SessionLocal() as db:
             # Provenance belongs on the step itself, not only on the journal: the result modal
             # and any later audit read the Task row.
@@ -1070,25 +1416,118 @@ class Orchestrator(threading.Thread):
                           f"Workspace after step: {post_status[:300] or 'no-changes'}",
                           conversation_id=conversation_id, provider=result.provider or provider_name,
                           model=result.model or model, step_index=index)
+                # A write outside the workspace is invisible above (the workspace
+                # fingerprint stays clean), so it is reported explicitly. Without this the
+                # journal says "no-changes" while files leaked into the application root.
+                with self._state_lock:
+                    root_snapshot = self._root_baseline.pop(child_id, None)
+                escaped, touched = (repo.root_escape_since(task_service.PROJECT_ROOT, root_snapshot)
+                                    if root_snapshot is not None else ([], []))
+                if escaped or touched:
+                    add_event(db, child_id,
+                              "workspace_escape_detected" if escaped else "root_file_touched",
+                              ("This step wrote OUTSIDE its approved workspace: "
+                               + ", ".join(escaped[:20])
+                               + "; the workspace diff alone missed it — move those files "
+                                 "into the workspace before trusting the result")
+                              if escaped else
+                              ("Root-level files changed while this step ran (user edit or "
+                               "step): " + ", ".join(touched[:20])),
+                              conversation_id=conversation_id,
+                              provider=result.provider or provider_name,
+                              model=result.model or model, step_index=index)
+                if escaped and result.ok:
+                    # Deliverables created outside the approved workspace are not a
+                    # success: stop at a checkpoint so the files can be inspected and
+                    # moved, instead of reporting a run that skipped its own workspace.
+                    result = dataclasses.replace(
+                        result,
+                        error="Step created files outside its approved workspace ("
+                              + ", ".join(escaped[:20]) + ")",
+                        ok=False)
+                if partial:
+                    with self._state_lock:
+                        self._partial_steps.add(child_id)
+                    add_event(db, child_id, "partial_work_detected",
+                              "Coding step failed after changing the workspace. Automatic "
+                              "retry/rescue is disabled until someone inspects the changes.",
+                              conversation_id=conversation_id, step_index=index)
             db.commit()
         if self._cancelled(anchor_id):
             return None
         return result
 
+    def _abort_anchor(self, anchor_id: int, message: str) -> None:
+        """Mark an anchor as failed with a message. Called when a job crashes."""
+        with SessionLocal() as db:
+            anchor = db.get(Task, anchor_id)
+            if anchor is not None:
+                cancelled = anchor.status == "cancelled"
+                # Mark the task itself as failed
+                if anchor.status in ("queued", "running", "reviewing"):
+                    transition(db, anchor, "failed", message)
+                # Mark all child tasks as cancelled to prevent them from running
+                for child in db.query(Task).filter(Task.parent_id == anchor_id).all():
+                    if child.status in ("queued", "running", "reviewing"):
+                        transition(db, child, "cancelled", "Cancelled with its parent request")
+                # A user stop must not be rewritten as a crash after the fact.
+                if not cancelled:
+                    add_event(db, anchor_id, "aborted", message)
+                db.commit()
+
     def _fail_plan(self, anchor_id: int, child_id: int, index: int, conversation_id: int, reason: str) -> None:
         with SessionLocal() as db:
+            anchor = db.get(Task, anchor_id)
+            if anchor is not None and anchor.status == "cancelled":
+                # A stop is a user decision, not a failure. Keep the cancellation and leave
+                # the history honest instead of replacing it with "failed".
+                add_event(db, anchor_id, "cancelled_during_step",
+                          f"Request stopped by user; step {index} did not finish",
+                          conversation_id=conversation_id, step_index=index)
+                db.commit()
+                return
             child = db.get(Task, child_id)
             if child is not None and child.status not in ("cancelled",):
                 add_event(db, child_id, "run_failed", reason[:500], conversation_id=conversation_id,
                           step_index=index)
                 if child.status in ("pending", "queued", "running"):
-                    transition(db, child, "failed", "Step failed")
+                    # "queued" and "pending" cannot transition directly to "failed" per
+                    # ALLOWED_TRANSITIONS; use force_transition to mark the step as failed.
+                    force_transition(db, child, "failed", "Step failed")
+                release_lease(db, child.id)
             add_event(db, anchor_id, "run_failed", reason[:500], conversation_id=conversation_id,
                       step_index=index)
-            db.commit()
             anchor = db.get(Task, anchor_id)
-            if anchor is not None and anchor.status in ("queued", "running"):
-                transition(db, anchor, "failed", "Conversation execution failed")
+            if anchor is not None:
+                completed = (db.query(Task).filter(Task.parent_id == anchor_id)
+                             .order_by(Task.plan_step_index, Task.id).all())
+                sections = [f"## {item.title}\n\n{item.result}"
+                            for item in completed if item.result]
+                report = "\n\n".join(sections) or "Tidak ada output langkah yang berhasil disimpan."
+                report += (
+                    "\n\n## Status pekerjaan\n"
+                    f"Pemulihan otomatis berhenti pada langkah {index}: {reason[:1200]}\n\n"
+                    "Konten di atas adalah hasil parsial dan belum dianggap selesai atau tervalidasi."
+                )
+                save_result(db, anchor, report)
+                if anchor.status == "queued":
+                    transition(db, anchor, "running", "Execution failed before step completion")
+                if anchor.status in ("running", "reviewing"):
+                    transition(db, anchor, "failed", "Conversation execution failed")
+                add_event(db, anchor_id, "partial_result_ready",
+                          f"Hasil parsial disimpan setelah pemulihan otomatis berhenti: "
+                          f"{anchor.artifact_path or 'artefak tugas'}",
+                          conversation_id=conversation_id)
+                if conversation_id:
+                    conversation_service.add_message(
+                        db, conversation_id,
+                        f"Pemulihan otomatis berhenti pada langkah {index}. Hasil parsial "
+                        f"tersedia di {anchor.artifact_path or 'artefak tugas'} dengan status "
+                        "belum selesai/terverifikasi. Aku tidak menunggu persetujuan untuk "
+                        "pekerjaan rutin; konflik atau perubahan berisiko tetap dihentikan "
+                        "agar tidak menimpa data.",
+                        role="assistant")
+            db.commit()
 
     # -- QC phase --------------------------------------------------------------
 
@@ -1225,8 +1664,17 @@ class Orchestrator(threading.Thread):
                     criteria_payload = [item.model_dump() for item in validated.criteria]
                     artifacts_payload = list(validated.artifacts_checked)
             if diagnostic:
-                findings = diagnostic[:2000]
-                evidence_text = (result.text or "")[:2000]
+                findings = sanitize_event(diagnostic, 2000)
+                evidence_text = sanitize_event(result.text or "", 2000)
+            else:
+                findings = sanitize_event(findings, 2000)
+                evidence_text = sanitize_event(evidence_text, 2000)
+            repair_steps = list(failed_steps)
+            if allow_revision and verdict == "fail" and not diagnostic and not repair_steps:
+                # Reviewers sometimes identify missing workspace evidence but cannot map it
+                # to a plan index. Retry bounded, file-producing steps instead of immediately
+                # asking the user to choose "revise or cancel" for a recoverable QC gap.
+                repair_steps = [index for index, step in enumerate(plan.steps) if step.uses_tools]
             if not criteria_payload:
                 criteria_payload = [{"id": cid, "criterion": criterion}
                                     for cid, criterion in zip(ids, criteria)]
@@ -1267,35 +1715,65 @@ class Orchestrator(threading.Thread):
                     self._end_meeting(db, anchor_id, conversation_id, participants)
                     return
                 if (allow_revision and verdict == "fail"
-                        and iteration <= cfg["retry_max"] and failed_steps):
+                        and iteration <= cfg["retry_max"] and repair_steps):
                     transition(db, anchor, "running",
-                               f"QC round {iteration} failed; revising steps {failed_steps}")
+                               f"QC round {iteration} failed; revising steps {repair_steps}")
+                    if not failed_steps:
+                        add_event(db, anchor_id, "qc_auto_repair",
+                                  f"QC did not identify step indexes; automatically retrying "
+                                  f"file-producing steps {repair_steps} within the configured retry limit",
+                                  conversation_id=conversation_id)
                     leader = self._leader(db)
                     if leader is not None:
                         say(db, anchor_id, leader,
                             f"QC putaran {iteration} menemukan masalah di langkah "
-                            f"{failed_steps}: {redact(findings, 200)}. "
+                            f"{repair_steps}: {redact(findings, 200)}. "
                             "Pemilik langkah saya minta perbaiki sekarang, lalu kita review ulang.",
                             conversation_id=conversation_id)
-                    self._review_visits(db, anchor_id, conversation_id, failed_steps, findings)
+                    self._review_visits(db, anchor_id, conversation_id, repair_steps, findings)
                     db.commit()
                 else:
                     reason = ("QC failed" if verdict == "fail"
                               else "QC verdict unreadable or QC run failed — treating as failure")
+                    partial_report = summary or "Tidak ada output langkah yang berhasil disimpan."
+                    partial_report += (
+                        "\n\n## Status verifikasi\n"
+                        f"Hasil belum lolos QC setelah {iteration} pemeriksaan. "
+                        "Konten di atas adalah hasil sementara dan belum boleh dianggap tervalidasi.\n\n"
+                        f"Temuan QC: {findings[:1800]}"
+                    )
+                    if evidence.files:
+                        partial_report += "\n\nArtefak yang berhasil dibaca: " + ", ".join(
+                            item["ref"] for item in evidence.files[:12])
+                    if evidence.missing:
+                        partial_report += "\n\nArtefak yang belum ditemukan: " + ", ".join(
+                            evidence.missing[:12])
+                    save_result(db, anchor, partial_report)
                     transition(db, anchor, "failed", reason)
                     leader = self._leader(db)
                     if leader is not None:
                         say(db, anchor_id, leader,
-                            f"Permintaan #{anchor_id} gagal: {reason}. "
-                            f"Temuan QC: {redact(findings, 220) or 'tidak ada detail'}. "
-                            "Saya butuh keputusan user untuk melanjutkan (revisi atau batalkan).",
-                            conversation_id=conversation_id, event_type="needs_help")
+                            f"Permintaan #{anchor_id} belum lolos verifikasi setelah percobaan "
+                            f"otomatis. Hasil sementara sudah disimpan di "
+                            f"{anchor.artifact_path or 'artefak tugas'}; status QC dan file yang "
+                            "belum terbukti tercantum di hasil. Tidak ada keputusan yang perlu "
+                            "diambil untuk pekerjaan lokal ini.",
+                            conversation_id=conversation_id, event_type="agent_chat")
+                    if conversation_id:
+                        conversation_service.add_message(
+                            db, conversation_id,
+                            f"Hasil sementara permintaan #{anchor_id} sudah tersedia di "
+                            f"{anchor.artifact_path or 'artefak tugas'}. Saya sudah mencoba "
+                            "pemulihan otomatis, tetapi QC belum dapat memverifikasi semua kriteria. "
+                            "Statusnya tetap gagal/belum terverifikasi; temuan dan artefak yang "
+                            "terbaca disertakan pada hasil. Pekerjaan lokal tidak menunggu persetujuan.",
+                            role="assistant")
                     self._end_meeting(db, anchor_id, conversation_id, participants)
                     return
             if not allow_revision:
                 return
             child_map = self._children_by_step(anchor_id)
-            for idx in failed_steps:
+            for idx in repair_steps:
                 step = plan.steps[idx]
                 child_id = child_map.get(idx)
                 if child_id is None:
@@ -1307,7 +1785,12 @@ class Orchestrator(threading.Thread):
                 revised = self._run_specialist_step(
                     step, idx, child_id, anchor_id, persona, outputs, instruction, timeout_s,
                     cfg, workspace, conversation_id,
-                    extra_prompt=f"Reviewer findings to address:\n{findings}")
+                    extra_prompt=(
+                        f"Reviewer findings to address:\n{findings}\n\n"
+                        "This is an automatic bounded recovery attempt. Inspect the authoritative "
+                        "task workspace and correct the actual deliverable there; do not only "
+                        "write a report claiming that files exist. Preserve unrelated files."
+                    ))
                 if revised is None:
                     return
                 with SessionLocal() as db:

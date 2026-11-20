@@ -19,14 +19,49 @@ SUMMARY_MAX = 120
 _SECRET_KV = re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*\S+"
                         r"|\b(bearer|authorization:?)\s+\S+")
 _LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-+/=]{28,}")
+# Model identifiers look exactly like a long token (`nvidia/stepfun-ai/step-5-preview`) but
+# they are not secrets. Masking them turned "model X is unavailable" into "model '•••' is
+# unavailable", which hid the real cause of a failure from everyone reading the journal.
+_MODEL_ID = re.compile(
+    r"(?<![\w./-])[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){1,3}(?![\w./-])")
 _SPACE = re.compile(r"\s+")
+
+
+def _mask_tokens(text: str) -> str:
+    """Mask long opaque tokens while keeping model identifiers readable."""
+    held: list[str] = []
+
+    def hold(match: re.Match) -> str:
+        held.append(match.group(0))
+        return f"\x00{len(held) - 1}\x00"
+
+    masked = _MODEL_ID.sub(hold, text)
+    masked = _LONG_TOKEN.sub("•••", masked)
+    for index, value in enumerate(held):
+        masked = masked.replace(f"\x00{index}\x00", value)
+    return masked
 
 
 def redact(text: str, limit: int = SUMMARY_MAX) -> str:
     """One line, secrets masked, bounded length."""
     clean = _SPACE.sub(" ", str(text or "")).strip()
     clean = _SECRET_KV.sub(lambda m: f"{(m.group(1) or m.group(2)).rstrip(':')} •••", clean)
-    clean = _LONG_TOKEN.sub("•••", clean)
+    clean = _mask_tokens(clean)
+    return clean if len(clean) <= limit else clean[: limit - 1] + "…"
+
+
+def scrub_secrets(text: str) -> str:
+    """Mask secret-looking values while preserving newlines and layout (journal messages
+    such as plans or QC findings are multi-line, so they cannot be flattened)."""
+    clean = _SECRET_KV.sub(lambda m: f"{(m.group(1) or m.group(2)).rstrip(':')} •••",
+                           str(text or ""))
+    return _mask_tokens(clean)
+
+
+def sanitize_event(text: str, limit: int = 4000) -> str:
+    """The single gate every journal message goes through: secrets masked, size bounded.
+    Never stores raw tool input, credentials or an unbounded provider error."""
+    clean = scrub_secrets(text).strip()
     return clean if len(clean) <= limit else clean[: limit - 1] + "…"
 
 

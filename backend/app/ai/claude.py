@@ -26,9 +26,12 @@ from pathlib import Path
 
 from app.agent_actions import actions_from_stream_line
 from app.ai.base import CancelCheck, Persona, ProviderResult, is_recoverable
-from app.tools.procs import kill_tree, wait_for_drain
+from app.tools import registry
+from app.tools.procs import OutputPump, kill_tree, reap, wait_for_drain, watch_run
 
 MAX_PROMPT_CHARS = 12000
+# A silent engine is a stuck engine; see app.tools.procs.OutputPump.
+IDLE_TIMEOUT_S = 120.0
 # Aliases (sonnet, opus, haiku, fable) or full model ids such as claude-sonnet-5-5.
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._\-\[\]]{1,80}$")
 CODING_TOOLS = "Read,Write,Edit,Glob,Grep,Bash"
@@ -88,11 +91,12 @@ def build_text_argv(binary: str, model: str, stream: bool = False) -> list[str]:
             "--strict-mcp-config", "--model", model, "--tools", ""]
 
 
-def build_coding_argv(binary: str, model: str, stream: bool = False) -> list[str]:
+def build_coding_argv(binary: str, model: str, stream: bool = False,
+                      allowed_tools: str = CODING_TOOLS) -> list[str]:
     _check_model(model)
     return [binary, "-p", *_output_flags(stream), "--no-session-persistence",
             "--strict-mcp-config", "--model", model, "--permission-mode", "acceptEdits",
-            "--tools", CODING_TOOLS, "--allowedTools", CODING_TOOLS]
+            "--tools", allowed_tools, "--allowedTools", allowed_tools]
 
 
 def parse_result(stdout: str) -> tuple[str, str | None]:
@@ -137,8 +141,9 @@ class ClaudeProvider:
         sink = persona.on_action
         stream = sink is not None
         try:
-            argv = (build_coding_argv(self.binary, model, stream) if coding
-                    else build_text_argv(self.binary, model, stream))
+            argv = (build_coding_argv(self.binary, model, stream,
+                                      ",".join(registry.cli_allowlist(persona.tools)))
+                    if coding else build_text_argv(self.binary, model, stream))
         except ValueError as e:
             return self._tag(ProviderResult(ok=False, error=str(e)), model)
         full_prompt = f"{persona.instructions}\n\n---\n\nTask: {prompt}"[:MAX_PROMPT_CHARS]
@@ -163,27 +168,36 @@ class ClaudeProvider:
             return self._tag(ProviderResult(ok=False, error="claude CLI not found on PATH"), model)
 
         box: dict = {}
+        if sink is None:
+            reader = OutputPump(proc, full_prompt).start()
+            if reader.feeds_stdin:
+                try:
+                    proc.stdin.write(full_prompt)
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                except Exception:  # noqa: BLE001 - a CLI that closed stdin early still reports via stdout
+                    pass
+            activity = None
+        else:
+            activity_box = {"last": time.monotonic()}
 
-        def _drain() -> None:
-            if sink is None:
-                box["io"] = proc.communicate(input=full_prompt)
-            else:
-                box["io"] = _drain_stream(proc, full_prompt, sink)
+            def _drain() -> None:
+                box["io"] = _drain_stream(proc, full_prompt, sink, activity_box)
 
-        reader = threading.Thread(target=_drain, daemon=True)
-        reader.start()
+            reader = threading.Thread(target=_drain, daemon=True)
+            reader.start()
+            activity = lambda: activity_box["last"]
         deadline = started + timeout_s
-        killed = False
-        while reader.is_alive():
-            if (should_cancel and should_cancel()) or time.monotonic() > deadline:
-                kill_tree(proc.pid)
-                killed = True
-                break
-            reader.join(0.5)
+        outcome = watch_run(proc, reader, deadline, should_cancel, idle_s=IDLE_TIMEOUT_S,
+                            activity=activity)
+        killed = outcome != "finished"
         drained = wait_for_drain(reader)
         latency = time.monotonic() - started
         if killed:
-            reason = "Cancelled" if (should_cancel and should_cancel()) else f"Timed out after {timeout_s}s"
+            reason = {"cancelled": "Cancelled",
+                      "timeout": f"Timed out after {timeout_s}s",
+                      "idle": (f"Engine produced no output for {IDLE_TIMEOUT_S:.0f}s — stopped "
+                               f"early instead of waiting for the full {timeout_s}s")}[outcome]
             if not drained:
                 reason += (" — pipes stayed open after killing the tree; a surviving descendant "
                            "may still hold the workspace, so do not assume it is clean")
@@ -191,20 +205,22 @@ class ClaudeProvider:
         if not drained:
             return self._tag(ProviderResult(ok=False, error="output pipes never reached EOF after the run",
                                             latency_s=latency), model)
-        stdout, stderr = box.get("io", ("", ""))
+        stdout, stderr = (reader.text() if isinstance(reader, OutputPump)
+                          else box.get("io", ("", "")))
         stdout, stderr = stdout or "", stderr or ""
         text, error_event = parse_result(stdout)
         if error_event:
             return self._tag(ProviderResult(ok=False, text=text, error=error_event, latency_s=latency), model)
-        if proc.returncode != 0 or not text:
-            fallback = (stderr or stdout or "").strip()[:300]
+        rc = reap(proc)
+        if rc not in (None, 0) or not text:
+            fallback = (stderr or "").strip()[:300] or (stdout or "").strip()[-400:]
             return self._tag(ProviderResult(ok=False, text=text,
-                                            error=fallback or f"claude exited with code {proc.returncode}",
+                                            error=fallback or f"claude exited with code {rc}",
                                             latency_s=latency), model)
         return self._tag(ProviderResult(ok=True, text=text, latency_s=latency), model)
 
 
-def _drain_stream(proc, prompt: str, sink) -> tuple[str, str]:
+def _drain_stream(proc, prompt: str, sink, activity: dict | None = None) -> tuple[str, str]:
     """Like `communicate()`, but hands each tool call to `sink` while the process still runs.
     Stdin and stderr get their own threads so a full pipe can never stall the stdout loop. A
     failing sink is ignored: the journal is a convenience and must not abort a working step."""
@@ -233,6 +249,8 @@ def _drain_stream(proc, prompt: str, sink) -> tuple[str, str]:
     lines: list[str] = []
     for line in proc.stdout:
         lines.append(line)
+        if activity is not None:
+            activity["last"] = time.monotonic()
         for kind, summary in actions_from_stream_line(line):
             try:
                 sink(kind, summary)

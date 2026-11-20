@@ -71,15 +71,15 @@ def _plan_of(row: Plan | None) -> TaskPlan | None:
 
 
 def _start_plan_meeting(db: Session, conv: Conversation, anchor: Task, row: Plan, plan: TaskPlan) -> None:
-    """While a plan waits for the user's decision, the people it involves gather in the meeting
-    room. The journal frame also sets the topic shown on the room's big screen."""
+    """The people assigned to a plan gather briefly for coordination. A human approval gate
+    is added separately only when the plan includes a high-risk or external action."""
     people = _plan_participants(db, plan)
     if not people:
         return
     names = ", ".join(a.name for a in people)
     topic = (row.summary or anchor.title or "rencana").strip().replace("\n", " ")
     add_event(db, anchor.id, "meeting_started",
-              f"Rencana v{row.version}: {topic[:60]} (menunggu persetujuan · peserta: {names})",
+              f"Rencana v{row.version}: {topic[:60]} (koordinasi tim · peserta: {names})",
               conversation_id=conv.id, to_room="meeting")
     for agent in people:
         seat_agent(db, agent.id, target_room="meeting")
@@ -192,6 +192,10 @@ def propose_plan(db: Session, conversation_id: int, plan: TaskPlan, summary: str
     conv = get_conversation(db, conversation_id)
     plan.validate_for_conversation()
     plan.validate_for_budget(plan_max_steps(db), plan_max_depth(db))
+    # Risk gates are mandatory policy, not a user preference toggle. Ordinary local work has
+    # no approval reason and starts immediately; declared external/destructive/high-risk work
+    # always waits for approval.
+    approval_reasons = plan.explicit_approval_reasons()
     anchor = _anchor(db, conv)
     if anchor.status == "awaiting_approval":
         _end_plan_meeting(db, conv, anchor, get_plan_row(db, conv.id, conv.current_plan_version), "diganti rencana baru")
@@ -211,7 +215,22 @@ def propose_plan(db: Session, conversation_id: int, plan: TaskPlan, summary: str
                event_type="plan_proposed", conversation_id=conv.id)
     db.refresh(row)
     _start_plan_meeting(db, conv, anchor, row, plan)
-    # No manual gate: the leader briefs the crew, signs the plan and execution is queued.
+    if approval_reasons:
+        # The plan touches something outside the local workspace. Nothing runs until a
+        # human approves this exact version; the reasons are stored, not implied.
+        leader = _coordinator_agent(db)
+        reason_text = "; ".join(approval_reasons)[:600]
+        add_event(db, anchor.id, "approval_required",
+                  f"Plan v{version} needs explicit approval: {reason_text}",
+                  conversation_id=conv.id)
+        say(db, anchor.id, leader,
+            f"Rencana v{version} menyentuh tindakan eksternal/berisiko tinggi: {reason_text}. "
+            "Saya hentikan di sini sampai kamu menyetujui versi ini.",
+            conversation_id=conv.id, event_type="needs_help")
+        db.commit()
+        return row
+    # No manual gate for ordinary local work: the leader briefs the crew, signs the plan
+    # and execution is queued.
     approve_plan(db, conv.id, version, decided_by=LEADER_IDENTITY)
     return row
 
@@ -266,7 +285,7 @@ def _coordinator_agent(db: Session) -> Agent | None:
 
 def proposal_message(db: Session, conv: Conversation, row: Plan, plan: TaskPlan) -> str:
     """The full proposal as one readable message: scope, who owns each step, execution
-    order with dependencies, acceptance criteria and the exact version to approve. This is
+    order with dependencies, acceptance criteria and any risk-gated action. This is
     the text stored in the transcript and queued to Telegram; the outbox splits it into
     Telegram-sized chunks in stable order."""
     names: dict[str, str] = {}
@@ -275,13 +294,21 @@ def proposal_message(db: Session, conv: Conversation, row: Plan, plan: TaskPlan)
     lines = [
         f"Proposal v{row.version} — “{conv.title[:80]}”",
         f"Scope: {row.summary or plan.summary or 'see the steps below'}",
-        "",
-        f"Plan in execution order ({len(plan.steps)} steps):",
     ]
+    if plan.goal:
+        lines.append(f"Goal: {plan.goal[:300]}")
+    if plan.scope:
+        lines.append(f"Boundaries: {plan.scope[:400]}")
+    if plan.assumptions:
+        lines.append("Assumptions: " + "; ".join(a[:160] for a in plan.assumptions[:8]))
+    if plan.risks:
+        lines.append("Risks: " + "; ".join(r[:160] for r in plan.risks[:8]))
+    lines.extend(["", f"Plan in execution order ({len(plan.steps)} steps):"])
     for index, step in enumerate(plan.steps):
         owner = step.agent_role + (f" · {names[step.agent_role]}" if step.agent_role in names else "")
         deps = ", ".join(f"#{d}" for d in step.depends_on) if step.depends_on else "nothing — starts right away"
-        tools = " · writes files in the workspace" if step.uses_tools else ""
+        tools = f" · tools: {', '.join(step.tools)}" if step.tools else (
+            " · writes files in the workspace" if step.uses_tools else "")
         lines.append(f"{index}. {step.title} — {owner}")
         lines.append(f"   Does: {step.instruction[:300]}")
         lines.append(f"   Depends on: {deps}{tools}")
@@ -291,8 +318,13 @@ def proposal_message(db: Session, conv: Conversation, row: Plan, plan: TaskPlan)
         lines.extend(["", "Overall acceptance criteria:"])
         lines.extend(f"- {criterion[:200]}" for criterion in plan.acceptance_criteria)
     lines.append("")
-    if conv.channel == "telegram":
-        lines.append(f"Work starts automatically. Send /revise <notes> to stop it and redraft.")
+    gate = plan.explicit_approval_reasons()
+    if gate:
+        lines.append("This plan needs YOUR explicit approval before anything runs:")
+        lines.extend(f"- {reason}" for reason in gate[:8])
+        lines.append("Approve this version from the approval panel, or request a revision.")
+    elif conv.channel == "telegram":
+        lines.append("Work starts automatically. Send /revise <notes> to stop it and redraft.")
     else:
         lines.append("Work starts automatically — watch the office log, or request a revision to redraft.")
     return "\n".join(lines)

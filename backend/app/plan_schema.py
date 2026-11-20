@@ -1,8 +1,32 @@
 import json
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.tools import registry as tool_registry
+
+
+_DESTRUCTIVE_CHANGE = re.compile(
+    r"\brm\s+-rf\b|\bremove-item\b[^\n]*(?:-recurse|-force)|"
+    r"\bgit\s+reset\s+--hard\b|\bwipe\b|\btruncate\b|"
+    r"\bformat\s+(?:disk|drive|partition|volume|database|db)\b|"
+    r"\bdrop\s+(?:database|table)\b|\bdelete\s+(?:all|from)\b|"
+    r"\b(?:hapus|menghapus)\s+(?:semua|seluruh|database|tabel|folder|file)\b|"
+    r"\b(?:revoke|disable)\s+(?:all\s+)?(?:access|permission|authentication|security|firewall|mfa)\b",
+    re.IGNORECASE,
+)
+_DANGER_NEGATION = re.compile(r"\b(?:do not|don't|never|jangan|tidak boleh|hindari|tanpa)\s*$",
+                              re.IGNORECASE)
+
+
+def _contains_destructive_change(text: str) -> bool:
+    for match in _DESTRUCTIVE_CHANGE.finditer(text):
+        prefix = text[max(0, match.start() - 40):match.start()]
+        if not _DANGER_NEGATION.search(prefix):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -42,6 +66,10 @@ class PlanStep(BaseModel):
     required: bool = True
     acceptance_criteria: list[str] = Field(default_factory=list)
     uses_tools: bool = False
+    # Declared tool intent. Empty keeps older plans valid (the coding CLI default set is
+    # used), but anything named must exist in app.tools.registry and be legal for the role.
+    tools: list[str] = Field(default_factory=list, max_length=12)
+    risk: Literal["low", "medium", "high"] = "low"
 
     @field_validator("agent_role")
     @classmethod
@@ -51,6 +79,14 @@ class PlanStep(BaseModel):
                 f"unknown agent_role {value!r}; use one of: {', '.join(ROLE_NAMES)}")
         return value
 
+    @field_validator("tools")
+    @classmethod
+    def declared_tools(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not str(value).strip() or len(str(value)) > 40:
+                raise ValueError("tool names must be short, non-empty identifiers")
+        return tool_registry.normalise_tools(values)
+
 
 class TaskPlan(BaseModel):
     # No hard step cap here: the safety limit is configurable per deployment
@@ -58,6 +94,11 @@ class TaskPlan(BaseModel):
     # clear error, so a plan is never silently trimmed.
     steps: list[PlanStep] = Field(min_length=1)
     summary: str = ""
+    goal: str = Field(default="", max_length=1000)
+    scope: str = Field(default="", max_length=4000)
+    assumptions: list[str] = Field(default_factory=list, max_length=20)
+    risks: list[str] = Field(default_factory=list, max_length=20)
+    external_actions: list[str] = Field(default_factory=list, max_length=20)
     acceptance_criteria: list[str] = Field(default_factory=list)
 
     @field_validator("steps")
@@ -84,7 +125,8 @@ class TaskPlan(BaseModel):
     def validate_for_conversation(self) -> None:
         """Stricter contract for plans that will gate execution: criteria must exist and
         every dependency target must be present (guaranteed by ordering, checked anyway).
-        A step that claims to write files must be owned by a coding-capable role."""
+        A step that claims to write files must be owned by a coding-capable role, and every
+        declared tool must exist and be legal for that role."""
         if not self.acceptance_criteria and not any(step.acceptance_criteria for step in self.steps):
             raise ValueError("plan must define acceptance criteria")
         for index, step in enumerate(self.steps):
@@ -95,6 +137,50 @@ class TaskPlan(BaseModel):
                 raise ValueError(
                     f"step {index} ({step.agent_role}) sets uses_tools but that role cannot "
                     f"write files; assign it to one of: {', '.join(sorted(CODING_CAPABLE_ROLES))}")
+            for raw in step.tools:
+                canonical = tool_registry.canonical_tool(raw)
+                spec = tool_registry.tool_spec(raw)
+                if canonical is None or spec is None:
+                    raise ValueError(
+                        f"step {index} requests unknown tool {raw!r}; declared tools are: "
+                        + ", ".join(sorted(tool_registry.TOOLS)))
+                if spec.mutates and not step.uses_tools:
+                    raise ValueError(
+                        f"step {index} requests mutating tool {canonical!r} but uses_tools is "
+                        "false; set uses_tools=true and assign a coding-capable role")
+                if spec.kind in ("write", "run") and step.agent_role not in CODING_CAPABLE_ROLES:
+                    raise ValueError(
+                        f"step {index} requests {canonical!r} but {step.agent_role} cannot write; "
+                        f"assign it to one of: {', '.join(sorted(CODING_CAPABLE_ROLES))}")
+                if spec.kind == "external" and step.agent_role not in CODING_CAPABLE_ROLES:
+                    raise ValueError(
+                        f"step {index} requests external tool {canonical!r}; assign it to a "
+                        "coding-capable role so the operation has an actual executor")
+
+    def explicit_approval_reasons(self) -> list[str]:
+        """Why this plan must stop for a human before anything runs. Empty means the normal
+        auto-approval path applies. Reasons name the concrete action/tool/risk, never a
+        generic 'approve this plan'."""
+        reasons: list[str] = []
+        for action in self.external_actions:
+            text = str(action).strip()
+            if text:
+                reasons.append(f"external action: {text[:200]}")
+        for index, step in enumerate(self.steps):
+            if step.risk == "high":
+                reasons.append(f"step {index} is marked high risk")
+            instruction = f"{step.title}\n{step.instruction}"
+            if _contains_destructive_change(instruction):
+                reasons.append(f"step {index} includes a destructive or security-sensitive change")
+            for raw in step.tools:
+                spec = tool_registry.tool_spec(raw)
+                if spec is not None and (spec.kind == "external" or spec.risk == "high"):
+                    reasons.append(f"step {index} uses {spec.name} ({spec.summary})")
+        plan_context = "\n".join((self.goal, self.scope, *self.assumptions, *self.risks))
+        if _contains_destructive_change(plan_context):
+            reasons.append("plan scope includes a destructive or security-sensitive change")
+        # Preserve order, drop duplicates.
+        return list(dict.fromkeys(reasons))
 
     def validate_for_budget(self, max_steps: int, max_depth: int) -> None:
         """Enforce the configurable safety limits with a fixable error instead of trimming

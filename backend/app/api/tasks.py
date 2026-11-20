@@ -46,23 +46,37 @@ def get_task_result(task_id: int, db: Session = Depends(get_db)):
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     children = db.query(Task).filter(Task.parent_id == task_id).order_by(Task.id).all()
-    from app.models import QcReview
+    from app.models import QcReview, TaskEvent
     from app.task_service import ARTIFACTS_DIR
     plan_steps = []
+    plan_meta: dict = {}
     if task.plan_json:
         import json
         try:
             parsed = json.loads(task.plan_json)
-            plan_steps = parsed.get("steps", []) if isinstance(parsed, dict) else []
+            if isinstance(parsed, dict):
+                plan_steps = parsed.get("steps", [])
+                plan_meta = {key: parsed.get(key) for key in
+                             ("summary", "goal", "scope", "assumptions", "risks",
+                              "external_actions", "acceptance_criteria")
+                             if parsed.get(key) not in (None, "", [])}
         except ValueError:
             plan_steps = []
+    failure_reason = ""
+    if task.status in ("failed", "cancelled"):
+        reason = (db.query(TaskEvent)
+                  .filter(TaskEvent.task_id == task_id,
+                          TaskEvent.event_type.in_(("run_failed", "needs_help", "interrupted",
+                                                    "review_failed", "merge_conflict")))
+                  .order_by(TaskEvent.id.desc()).first())
+        failure_reason = reason.message if reason is not None else ""
     diff_file = ARTIFACTS_DIR / f"task-{task_id}.diff.txt"
     from app.api.preview import build_preview
     return TaskResultRead(
         id=task.id, title=task.title, status=task.status, run_mode=task.run_mode,
         result=task.result, artifact_path=task.artifact_path,
         children=[TaskRead.model_validate(child) for child in children],
-        plan_steps=plan_steps,
+        plan_steps=plan_steps, plan_meta=plan_meta, failure_reason=failure_reason,
         qc_reviews=[QcReviewRead.model_validate(r) for r in
                     db.query(QcReview).filter(QcReview.task_id == task_id).order_by(QcReview.iteration).all()],
         diff_path=str(diff_file.relative_to(ARTIFACTS_DIR.parents[1])) if diff_file.exists() else "",
@@ -158,11 +172,19 @@ def update_task(task_id: int, payload: TaskUpdate, db: Session = Depends(get_db)
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskRead)
 def cancel_task(task_id: int, db: Session = Depends(get_db)):
+    """Cancel a request *and* everything it spawned.
+
+    Cancelling only the anchor used to leave its running steps alive, and the worker then
+    rewrote the anchor's `cancelled` status as `failed` when the step returned.
+    """
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     try:
-        task = transition(db, task, "cancelled", "Task cancelled by user", "cancelled")
+        if task.status in ACTIVE_STATUSES:
+            task = cancel_tree(db, task, "Cancelled by user")
+        else:
+            task = transition(db, task, "cancelled", "Task cancelled by user", "cancelled")
     except TransitionError:
         raise HTTPException(status_code=409, detail=f"Task cannot be cancelled from status {task.status}")
     return task
@@ -191,23 +213,38 @@ def clear_tasks(db: Session = Depends(get_db)):
 
 @router.post("/tasks/{task_id}/reassign", response_model=TaskRead)
 def reassign_task(task_id: int, payload: ReassignRequest, db: Session = Depends(get_db)):
-    """Leader hand-over: give a step task to another employee and let it retry immediately.
+    """Leader hand-over: give a step task to another employee and let it retry.
 
-    The instruction is recorded as an agent_chat frame addressed to the new owner, so the team
-    feed shows the rescue exactly as it happened (who was told, why, by whom)."""
+    When the step belongs to a failed conversation, the parent request is queued again so
+    the scheduler actually picks it up. Completed steps are kept; only the unfinished ones
+    run. The instruction is recorded as an agent_chat frame addressed to the new owner."""
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     agent = db.get(Agent, payload.agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    parent = db.get(Task, task.parent_id) if task.parent_id is not None else None
+    step = None
+    if parent is not None and parent.plan_json and task.plan_step_index is not None:
+        import json
+        from app.plan_schema import CODING_CAPABLE_ROLES, TaskPlan
+        try:
+            plan = TaskPlan.model_validate(json.loads(parent.plan_json))
+            if task.plan_step_index < len(plan.steps):
+                step = plan.steps[task.plan_step_index]
+        except (ValueError, TypeError):
+            step = None
+        if step is not None and step.uses_tools and agent.role not in CODING_CAPABLE_ROLES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{agent.role} cannot take a coding step; choose one of: "
+                       + ", ".join(sorted(CODING_CAPABLE_ROLES)))
     leader = db.query(Agent).filter(Agent.role == "AI Coordinator").order_by(Agent.id).first()
     previous = db.get(Agent, task.agent_id) if task.agent_id else None
     task.agent_id = agent.id
     task.updated_at = datetime.now(timezone.utc)
-    if task.status in ("pending", "queued"):
-        task.status = "queued"
-    elif task.status in ("failed", "cancelled"):
+    if task.status in ("pending", "queued", "failed", "cancelled"):
         task.status = "queued"
     note = payload.note.strip() or "pekerjaan ini dialihkan karena pemegang sebelumnya tidak selesai"
     say(db, task.id, leader,
@@ -225,6 +262,16 @@ def reassign_task(task_id: int, payload: ReassignRequest, db: Session = Depends(
     if room:
         seat_agent(db, agent.id, room=room, step_index=task.plan_step_index)
     db.commit()
+    if (parent is not None and parent.run_mode == "conversation"
+            and parent.status == "failed"):
+        # The scheduler only claims anchors, so a reassigned child alone would sit there
+        # forever. Requeue the request; the orchestrator skips completed steps.
+        try:
+            transition(db, parent, "queued",
+                       f"Resume requested: step {task.plan_step_index or '?'} handed to {agent.name}",
+                       "resume_requested")
+        except TransitionError:
+            pass
     db.refresh(task)
     return task
 

@@ -40,6 +40,67 @@ def capture_diff(ws: Path) -> tuple[str, str]:
     return status, diff
 
 
+def workspace_fingerprint(ws: Path) -> str:
+    """Content fingerprint of the workspace *without* committing anything.
+
+    `git status` is not enough to tell whether a step changed a file that was already
+    modified, so the staged tree hash is used instead. Staging is non-destructive and the
+    worktree content is what matters; this never creates a commit."""
+    try:
+        if not ensure_git(ws):
+            entries = sorted(
+                f"{p.relative_to(ws).as_posix()}:{p.stat().st_size}:{p.stat().st_mtime_ns}"
+                for p in ws.rglob("*") if p.is_file())
+            return "files:" + "|".join(entries)[:20000]
+        _git(ws, "add", "-A", "--", ".")
+        tree = _git(ws, "write-tree").stdout.strip()
+        return "tree:" + (tree or "unavailable")
+    except Exception:  # noqa: BLE001 - an unreadable workspace must never crash a step
+        return "unknown"
+
+
+def workspace_changed_since(ws: Path | None, fingerprint: str | None) -> bool:
+    """True when the step left files behind. Unknown baseline/failure means 'assume changed'
+    so a coding retry is never started blindly."""
+    if ws is None or not fingerprint:
+        return True
+    return workspace_fingerprint(ws) != fingerprint
+
+
+def root_escape_snapshot(root: Path) -> dict[str, tuple[int, int]]:
+    """Snapshot of the files sitting directly in the application repo root.
+
+    A coding step that writes outside its approved workspace shows up here and nowhere
+    else: the workspace fingerprint stays clean while `index.html`/`script.js`/
+    `style.css` appear next to `README.md`. Directories are skipped so `data/`,
+    `backend/.venv` and `frontend/node_modules` never make this expensive."""
+    items: dict[str, tuple[int, int]] = {}
+    try:
+        for p in root.iterdir():
+            if p.is_file():
+                st = p.stat()
+                items[p.name] = (st.st_size, st.st_mtime_ns)
+    except Exception:  # noqa: BLE001 - an unreadable root must never crash a step
+        pass
+    return items
+
+
+def root_escape_since(root: Path, snapshot: dict | None) -> tuple[list[str], list[str]]:
+    """(created, modified) root-level files that appeared or changed since `snapshot`.
+
+    Creation is the escape signature: a coding step told to work inside
+    `data/workspace/project-<id>/` that instead drops `index.html` next to `README.md`
+    shows up here and nowhere else. Modification is reported separately so an ordinary
+    edit (README, notes) stays a visible warning instead of a false escape verdict."""
+    if not snapshot:
+        return [], []
+    current = root_escape_snapshot(root)
+    created = sorted(name for name in current if name not in snapshot)
+    modified = sorted(name for name, sig in current.items()
+                      if name in snapshot and snapshot[name] != sig)
+    return created, modified
+
+
 # -- isolated worktrees + explicit merge (concurrent coding tasks) -------------
 #
 # Two coding steps that might touch the same file must never write the same directory at

@@ -7,11 +7,18 @@ import time
 from pathlib import Path
 
 from app.ai.base import CancelCheck, Persona, ProviderResult, is_recoverable
-from app.tools.procs import kill_tree, wait_for_drain
+from app.tools import registry
+from app.tools.procs import OutputPump, kill_tree, reap, wait_for_drain, watch_run
 
 MAX_PROMPT_CHARS = 12000
+# A silent engine is a stuck engine; see app.tools.procs.OutputPump.
+IDLE_TIMEOUT_S = 120.0
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9 ._-]{1,80}$")
 CODING_TOOLS = "Read,Write,Edit,Glob,Grep,Bash"
+# Canonical registry name → the CLI tool name qodercli understands.
+def cli_tools(tools: tuple[str, ...] | list[str]) -> str:
+    """Minimum allowlist for this step, in qodercli's names. Unknown/empty → default set."""
+    return ",".join(registry.cli_allowlist(tools))
 QODER_HOME = Path.home() / ".qoder" / "bin" / "qodercli"
 
 
@@ -40,12 +47,13 @@ def build_text_argv(binary: str, model: str, config_dir: str) -> list[str]:
             "--config-dir", config_dir, "--tools", "", "-m", model]
 
 
-def build_coding_argv(binary: str, model: str, workspace: str, config_dir: str) -> list[str]:
+def build_coding_argv(binary: str, model: str, workspace: str, config_dir: str,
+                      allowed_tools: str = CODING_TOOLS) -> list[str]:
     if not MODEL_PATTERN.match(model):
         raise ValueError(f"Invalid model identifier: {model!r}")
     return [binary, "-p", "--output-format", "json", "--config-dir", config_dir,
             "-w", workspace, "--permission-mode", "accept_edits",
-            "--allowed-tools", CODING_TOOLS, "-m", model]
+            "--allowed-tools", allowed_tools, "-m", model]
 
 
 def parse_result(stdout: str) -> tuple[str, str | None]:
@@ -92,7 +100,8 @@ class QoderProvider:
             return self._tag(ProviderResult(ok=False, error="coding step has no workspace"), model)
         try:
             if coding:
-                argv = build_coding_argv(self.binary, model, str(persona.workspace), self.config_dir)
+                argv = build_coding_argv(self.binary, model, str(persona.workspace),
+                                         self.config_dir, cli_tools(persona.tools))
             else:
                 argv = build_text_argv(self.binary, model, self.config_dir)
         except ValueError as e:
@@ -116,29 +125,24 @@ class QoderProvider:
         except FileNotFoundError:
             return self._tag(ProviderResult(ok=False, error="qodercli not found on PATH"), model)
 
-        box: dict = {}
-
-        def _drain() -> None:
-            box["io"] = proc.communicate(input=full_prompt)
-
-        reader = threading.Thread(target=_drain, daemon=True)
-        reader.start()
+        pump = OutputPump(proc, full_prompt).start()
+        if pump.feeds_stdin:
+            try:
+                proc.stdin.write(full_prompt)
+                proc.stdin.flush()
+                proc.stdin.close()
+            except Exception:  # noqa: BLE001 - a CLI that closed stdin early still reports via stdout
+                pass
         deadline = started + timeout_s
-        killed = False
-        while reader.is_alive():
-            if should_cancel and should_cancel():
-                kill_tree(proc.pid)
-                killed = True
-                break
-            if time.monotonic() > deadline:
-                kill_tree(proc.pid)
-                killed = True
-                break
-            reader.join(0.5)
-        drained = wait_for_drain(reader)
+        outcome = watch_run(proc, pump, deadline, should_cancel, idle_s=IDLE_TIMEOUT_S)
+        killed = outcome != "finished"
+        drained = wait_for_drain(pump)
         latency = time.monotonic() - started
         if killed:
-            reason = "Cancelled" if (should_cancel and should_cancel()) else f"Timed out after {timeout_s}s"
+            reason = {"cancelled": "Cancelled",
+                      "timeout": f"Timed out after {timeout_s}s",
+                      "idle": (f"Engine produced no output for {IDLE_TIMEOUT_S:.0f}s — stopped "
+                               f"early instead of waiting for the full {timeout_s}s")}[outcome]
             if not drained:
                 reason += (" — pipes stayed open after killing the tree; a surviving descendant "
                            "may still hold the workspace, so do not assume it is clean")
@@ -146,15 +150,16 @@ class QoderProvider:
         if not drained:
             return self._tag(ProviderResult(ok=False, error="output pipes never reached EOF after the run",
                                             latency_s=latency), model)
-        stdout, stderr = box.get("io", ("", ""))
+        stdout, stderr = pump.text()
         stdout, stderr = stdout or "", stderr or ""
         text, error_event = parse_result(stdout)
         if error_event:
             return self._tag(ProviderResult(ok=False, text=text, error=error_event, latency_s=latency), model)
-        if proc.returncode != 0 or not text:
-            fallback = (stderr or stdout or "").strip()[:300]
+        rc = reap(proc)
+        if rc not in (None, 0) or not text:
+            fallback = (stderr or "").strip()[:300] or (stdout or "").strip()[-400:]
             return self._tag(ProviderResult(ok=False, text=text,
-                                            error=fallback or f"qodercli exited with code {proc.returncode}",
+                                            error=fallback or f"qodercli exited with code {rc}",
                                             latency_s=latency), model)
         return self._tag(ProviderResult(ok=True, text=text, latency_s=latency), model)
 

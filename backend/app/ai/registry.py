@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 
@@ -79,6 +80,39 @@ def availability() -> dict[str, dict]:
             "coding_flags": cap["coding_flags"] if available else "unavailable — CLI binary not found",
         }
     return result
+
+
+# What each CLI accepts as a model identifier. These differ on purpose: opencode uses
+# "<vendor>/<model>" ids, while qodercli and Claude Code reject a slash outright. Passing one
+# provider's model to another is therefore an instant, avoidable failure — which is exactly
+# what used to happen on every fallback (`Invalid model identifier: '...'`).
+MODEL_PATTERNS = {
+    "opencode": re.compile(r"^[A-Za-z0-9@._/\-]{1,120}$"),
+    "qoder": re.compile(r"^[A-Za-z0-9 ._\-]{1,80}$"),
+    "claude": re.compile(r"^[A-Za-z0-9._\-\[\]]{1,80}$"),
+}
+
+
+def model_supported(provider: str, model: str) -> bool:
+    """True when `provider`'s CLI can accept this model identifier at all."""
+    if not model:
+        return False
+    pattern = MODEL_PATTERNS.get(provider)
+    return pattern is None or bool(pattern.match(model))
+
+
+def resolve_model(provider: str, preferred: str, fallback: str = "") -> str:
+    """A model identifier this provider can actually run.
+
+    Used whenever a step moves between engines (fallback, rotation, rescue): the model that
+    belongs to the provider is kept only if it is valid there, otherwise the provider's own
+    configured model is used. An empty string means "no usable model", so the caller can
+    skip that engine instead of launching a run that is guaranteed to fail."""
+    if model_supported(provider, preferred):
+        return preferred
+    if model_supported(provider, fallback):
+        return fallback
+    return ""
 
 
 def list_models(provider: str, force: bool = False) -> list[str]:

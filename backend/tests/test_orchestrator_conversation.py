@@ -224,14 +224,15 @@ def test_telegram_proposal_is_queued_in_full_with_stable_order(conv_db):
     assert order == sorted(order)                            # chunks keep their sequence
 
 
-def test_turn_provider_error_does_not_retry_until_new_user_message(conv_db):
+def test_turn_provider_error_retries_automatically_then_stops_cleanly(conv_db):
     conv_id, anchor_id = start_conversation(conv_db)
     tick.provider = FakeProvider([ProviderResult(ok=False, error="Free usage limit reached")])
     tick(conv_db)
-    assert len(tick.provider.calls) == 1
+    assert len(tick.provider.calls) == 2
     assert state(conv_db, anchor_id) == "clarifying"
     msgs = messages_for(conv_db, conv_id)
-    assert msgs[-1].role == "assistant" and "Coordinator error" in msgs[-1].content
+    assert msgs[-1].role == "assistant" and "pemulihan otomatis" in msgs[-1].content
+    assert "Belum ada pekerjaan" in msgs[-1].content
     tick.provider = FakeProvider([])
     tick(conv_db)
     assert len(tick.provider.calls) == 0

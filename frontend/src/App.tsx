@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
-  Activity, Ban, CircleAlert, FileText, MessagesSquare, RefreshCw, Send, Sparkles, Square, X,
+  Activity, Ban, CircleAlert, FileText, Link2, MessagesSquare, RefreshCw, Send, Settings2, ShieldCheck, Sparkles, Square, UploadCloud, Users, X,
 } from 'lucide-react'
 import OfficeScene from './features/office/OfficeScene'
 import ProviderBar from './features/provider/ProviderBar'
 import ChatPanel from './features/chat/ChatPanel'
 import ApprovalsPanel, { approvalItems } from './features/plan/ApprovalsPanel'
+import IntegrationsPanel from './features/integrations/IntegrationsPanel'
+import PublishPanel from './features/publish/PublishPanel'
 import TeamConversation, { mergeTeam, pushTeam } from './features/events/TeamConversation'
 import ResultStage from './features/result/ResultStage'
 import { latestByAgent } from './lib/activity'
 import { isActionEvent, latestActionByAgent } from './features/iso/actions'
 import { latestErrandByAgent } from './features/iso/errands'
 import { useEventStream } from './lib/sse'
-import { api } from './lib/api'
+import { api, clientId } from './lib/api'
 import { isActive, statusLabel } from './lib/status'
 import type { Agent, AiConfig, Conversation, StreamEvent, Task, TaskResult, TeamEvent } from './types'
 
@@ -35,7 +37,6 @@ export default function App() {
   const [result, setResult] = useState<TaskResult | null>(null)
   const [resultLoading, setResultLoading] = useState(false)
   const [resultOpen, setResultOpen] = useState(false)
-  const autoOpened = useRef<string | null>(null)
   const [newRequest, setNewRequest] = useState('')
   const [busy, setBusy] = useState(false)
   const [apiOnline, setApiOnline] = useState(false)
@@ -46,6 +47,7 @@ export default function App() {
   const [actions, setActions] = useState<Record<number, StreamEvent>>({})
   const [errands, setErrands] = useState<Record<number, StreamEvent>>({})
   const [convKey, setConvKey] = useState(0)
+  const [railView, setRailView] = useState<'chat' | 'actions' | 'team' | 'settings' | 'integrations' | 'publish'>('chat')
   const lastStreamRefresh = useRef(0)
 
   const refresh = useCallback(async () => {
@@ -131,13 +133,14 @@ export default function App() {
     if (selectedTask != null && tasks.some((task) => task.id === selectedTask)) return
     const next = orderedRuns(tasks)[0] ?? null
     setSelectedTask(next?.id ?? null)
-    if (next?.conversation_id != null) setSelectedConversation(next.conversation_id)
   }, [tasks, selectedTask])
 
-  // Surface a question the office is blocked on, without stealing focus from a picked job.
+  // Open a clarification that needs an answer; otherwise show the newest conversation.
+  // Once the user picks a conversation, automatic task selection never steals that choice.
   useEffect(() => {
     if (selectedConversation != null && conversations.some((conv) => conv.id === selectedConversation)) return
-    if (waitingConversation) setSelectedConversation(waitingConversation.id)
+    const next = waitingConversation ?? conversations[0] ?? null
+    setSelectedConversation(next?.id ?? null)
   }, [conversations, selectedConversation, waitingConversation])
 
   useEffect(() => {
@@ -154,20 +157,7 @@ export default function App() {
     return () => { cancelled = true }
   }, [selectedTask, selectedTaskData?.updated_at, connected])
 
-  // A finished deliverable is the whole point, so it opens itself in a big modal once per result.
-  // Closing it stays closed until the task produces a new version.
-  useEffect(() => {
-    if (!result || !selectedTaskData) return
-    if ((result.preview?.kind ?? 'none') === 'none') return
-    const key = `${selectedTaskData.id}:${selectedTaskData.updated_at}`
-    if (autoOpened.current === key) return
-    autoOpened.current = key
-    setResultOpen(true)
-  }, [result, selectedTaskData])
-
-  // Closing counts as "seen": a result that arrives afterwards must not pop the modal back open.
   function closeResult() {
-    if (selectedTaskData) autoOpened.current = `${selectedTaskData.id}:${selectedTaskData.updated_at}`
     setResultOpen(false)
   }
 
@@ -183,7 +173,7 @@ export default function App() {
     if (!newRequest.trim()) return
     setBusy(true)
     try {
-      const conv = await api.createConversation(newRequest.trim())
+      const conv = await api.createConversation(newRequest.trim(), clientId())
       setNewRequest('')
       setSelectedConversation(conv.id)
       setConvKey((k) => k + 1)
@@ -222,9 +212,7 @@ export default function App() {
     if (task.id !== selectedTask) setResult(null)
     setSelectedTask(task.id)
     if (task.conversation_id != null) setSelectedConversation(task.conversation_id)
-    // Picking a finished job is a request to look at what it made.
     if (task.status === 'completed') {
-      autoOpened.current = null
       setResultOpen(true)
     }
   }
@@ -256,6 +244,16 @@ export default function App() {
       </header>
 
       {error && <div className="error-banner"><CircleAlert size={17}/><span>{error}. Pastikan backend AgentVille berjalan.</span><button onClick={() => setError('')}><X size={15}/></button></div>}
+      {selectedTaskData && result?.result && ['completed', 'failed'].includes(selectedTaskData.status) && (
+        <div className={`result-available-banner ${selectedTaskData.status}`} role="status">
+          <span><FileText size={15} />
+            {selectedTaskData.status === 'failed'
+              ? 'Hasil sementara tersedia; belum lolos verifikasi.'
+              : 'Hasil pekerjaan siap dilihat.'}
+          </span>
+          <button className="secondary-button compact" onClick={() => setResultOpen(true)}>Buka hasil</button>
+        </div>
+      )}
 
       <div className="page-grid">
         <aside className="panel queue-panel">
@@ -310,17 +308,32 @@ export default function App() {
         </div>
 
         <aside className="col-rail">
-          {approvals.length > 0 && (
-            <ApprovalsPanel tasks={tasks} conversations={conversations} agents={agents}
-                            onAction={() => { void refresh(); setConvKey((k) => k + 1) }} onError={setError} />
-          )}
+          <nav className="rail-tabs" aria-label="Panel AgentVille">
+            <button className={railView === 'chat' ? 'active' : ''} aria-pressed={railView === 'chat'}
+                    onClick={() => setRailView('chat')}><MessagesSquare size={15} /> Chat
+              {waitingConversation && <span className="rail-tab-dot" title="Menunggu jawaban" />}
+            </button>
+            <button className={railView === 'actions' ? 'active' : ''} aria-pressed={railView === 'actions'}
+                    onClick={() => setRailView('actions')}><ShieldCheck size={15} /> Perlu aksi
+              {approvals.length > 0 && <span className="rail-tab-count">{approvals.length}</span>}
+            </button>
+            <button className={railView === 'team' ? 'active' : ''} aria-pressed={railView === 'team'}
+                    onClick={() => setRailView('team')}><Users size={15} /> Tim</button>
+            <button className={railView === 'settings' ? 'active' : ''} aria-pressed={railView === 'settings'}
+                    onClick={() => setRailView('settings')}><Settings2 size={15} /> AI</button>
+            <button className={railView === 'integrations' ? 'active' : ''} aria-pressed={railView === 'integrations'}
+                    onClick={() => setRailView('integrations')}><Link2 size={15} /> Integrasi</button>
+            <button className={railView === 'publish' ? 'active' : ''} aria-pressed={railView === 'publish'}
+                    onClick={() => setRailView('publish')}><UploadCloud size={15} /> Publikasi</button>
+          </nav>
 
-          {opening && (
+          {railView === 'chat' && (
             <section className="panel chat-card">
               <div className="panel-heading">
-                <div><h2><MessagesSquare size={15}/> {waitingConversation?.id === opening.id ? 'Kantor butuh jawabanmu' : 'Percakapan'}</h2><p>Jawab supaya pekerjaan bisa lanjut.</p></div>
-                <select aria-label="Pilih percakapan" value={opening.id}
-                        onChange={(e) => setSelectedConversation(Number(e.target.value))}>
+                <div><h2><MessagesSquare size={15}/> {waitingConversation?.id === opening?.id ? 'Kantor butuh jawabanmu' : 'Percakapan'}</h2><p>Riwayat dan klarifikasi permintaan.</p></div>
+                <select aria-label="Pilih percakapan" value={opening?.id ?? ''}
+                        onChange={(e) => setSelectedConversation(e.target.value ? Number(e.target.value) : null)}>
+                  {conversations.length === 0 && <option value="">Belum ada percakapan</option>}
                   {conversations.map((conv) => <option key={conv.id} value={conv.id}>#{conv.id} {conv.title.slice(0, 30)}</option>)}
                 </select>
               </div>
@@ -331,12 +344,23 @@ export default function App() {
             </section>
           )}
 
-          <TeamConversation events={team} connected={connected} />
-
-          <details className="rail-details">
-            <summary>Pengaturan AI</summary>
-            <ProviderBar config={ai} onConfig={setAi} />
-          </details>
+          {railView === 'actions' && (
+            <ApprovalsPanel tasks={tasks} conversations={conversations} agents={agents}
+                            onAction={() => { void refresh(); setConvKey((k) => k + 1) }} onError={setError} />
+          )}
+          {railView === 'team' && <TeamConversation events={team} connected={connected} />}
+          {railView === 'integrations' && <IntegrationsPanel onError={setError} />}
+          {railView === 'publish' && <PublishPanel onError={setError} />}
+          {railView === 'settings' && (
+            <section className="panel rail-ai-settings" aria-labelledby="ai-settings-title">
+              <div className="panel-heading">
+                <div><h2 id="ai-settings-title"><Settings2 size={15} /> Pengaturan AI</h2><p>Provider, model, dan perilaku agen.</p></div>
+              </div>
+              {ai
+                ? <ProviderBar config={ai} onConfig={setAi} />
+                : <p className="rail-ai-unavailable">Konfigurasi AI belum tersedia. Periksa koneksi backend, lalu muat ulang.</p>}
+            </section>
+          )}
         </aside>
       </div>
 

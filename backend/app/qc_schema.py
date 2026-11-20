@@ -37,7 +37,9 @@ class QcVerdict(BaseModel):
     criteria: list[QcCriterion] = Field(min_length=1, max_length=80)
     findings: str = Field(min_length=1, max_length=2000)
     evidence: str = Field(min_length=1, max_length=2000)
-    artifacts_checked: list[str] = Field(min_length=1, max_length=30)
+    # A failed review can still be useful when the reviewer cannot cite a readable
+    # artifact. A passing review remains subject to the stricter checks below.
+    artifacts_checked: list[str] = Field(default_factory=list, max_length=30)
     failed_steps: list[int] = Field(default_factory=list, max_length=80)
 
     @field_validator("artifacts_checked")

@@ -120,10 +120,26 @@ export default function ResultStage({ task, result, agents, loading }: {
         {!loading && kind === 'none' && <IdleStage result={result} active={active} done={done} steps={steps.length} />}
       </div>
 
+      {result?.failure_reason && (
+        <div className="stage-stop" role="status">
+          <strong>Berhenti:</strong> {result.failure_reason}
+        </div>
+      )}
+
       {result && result.qc_reviews && result.qc_reviews.length > 0 && (
         <div className="stage-foot">
           <span>QC: {result.qc_reviews.at(-1)?.verdict ?? '—'}</span>
           {result.diff_path && <span className="stage-diff">diff: {result.diff_path}</span>}
+          <details className="stage-qc">
+            <summary>Bukti QC</summary>
+            {result.qc_reviews.map((review) => (
+              <div key={review.id} className="stage-qc-review">
+                <strong>Putaran {review.iteration} · {review.verdict}</strong>
+                {review.findings && <p>{review.findings}</p>}
+                {review.evidence && <pre>{review.evidence}</pre>}
+              </div>
+            ))}
+          </details>
         </div>
       )}
     </section>

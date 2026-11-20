@@ -21,6 +21,11 @@ from app.ai.base import is_recoverable
 
 QUOTA_HINTS = ("free usage limit", "rate limit", "429", "quota", "overloaded",
                "out of credits", "usage limit")
+# Errors that prove the engine refused the work before it could touch the workspace.
+ENGINE_REFUSED_HINTS = QUOTA_HINTS + ("401", "402", "403", "502", "503", "504",
+                                      "model not found", "end of life", "no longer available",
+                                      "model unavailable", "model is unavailable", "retired",
+                                      "unauthorized", "forbidden")
 
 
 def quota_exhausted(result: ProviderResult) -> bool:
@@ -33,6 +38,18 @@ def quota_exhausted(result: ProviderResult) -> bool:
     if any(hint in lowered for hint in QUOTA_HINTS):
         return True
     return is_recoverable(result.error)
+
+
+def safe_to_rotate(result: ProviderResult, persona: Persona) -> bool:
+    """A coding step is only handed to another engine when this engine clearly refused
+    before doing work. A timeout/crash may have left partial files, so it stops for an
+    explicit resume decision instead of silently running the step twice."""
+    if not quota_exhausted(result):
+        return False
+    if persona.mode != "coding":
+        return True
+    lowered = (result.error or "").lower()
+    return any(hint in lowered for hint in ENGINE_REFUSED_HINTS)
 
 
 def looks_free(model: str) -> bool:
@@ -91,7 +108,9 @@ class RotatingProvider:
     def run(self, persona: Persona, prompt: str, timeout_s: int = 300,
             should_cancel: CancelCheck | None = None) -> ProviderResult:
         engine, name, model = self._primary, self._primary_name, self._model
-        attempts = 0
+        # The chain is a finite list that is consumed one candidate at a time, so the loop
+        # cannot spin: it ends when the chain is empty or the caller cancels. Do not add a
+        # second, smaller cap here — `rotate_models_max` is the configured limit.
         while True:
             result = engine.run(replace(persona, model=model), prompt, timeout_s=timeout_s,
                                 should_cancel=should_cancel)
@@ -99,6 +118,14 @@ class RotatingProvider:
                 if name != self._primary_name or model != self._model:
                     result = replace(result, provider=name or result.provider,
                                      model=model or result.model)
+                return result
+            if not safe_to_rotate(result, persona):
+                # A coding attempt may already have written files. Do not hand the same
+                # step to another engine behind the user's back.
+                if persona.mode == "coding":
+                    result = replace(result, error=(result.error or "provider failed") +
+                                     " — not rotated: a coding step may have left partial "
+                                     "changes; inspect the workspace before retrying")
                 return result
             # out of budget: move to the next candidate that may take this persona.
             nxt = None
@@ -116,6 +143,3 @@ class RotatingProvider:
                 self.switched.append(note)
             if self._on_switch:
                 self._on_switch(self._primary_name, self._model, name, model)
-            attempts += 1
-            if attempts > 12:  # hard stop, a hostile chain must never loop
-                return result

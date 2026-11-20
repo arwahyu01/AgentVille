@@ -13,6 +13,10 @@ class Persona:
     model: str | None = None
     mode: MODE = "text"
     workspace: str | None = None
+    # Canonical tools the plan declared for this step (app.tools.registry names). Empty means
+    # "use the provider's default coding set". Providers that support per-run allowlists pass
+    # only these to the CLI; others can only treat it as an instruction.
+    tools: tuple[str, ...] = ()
     # Optional live hook: called as on_action(kind, summary) for each tool call a provider can
     # observe while it runs (kind in read/write/run/search/think; summary is already redacted).
     # Providers that cannot stream tool events simply never call it.
@@ -33,7 +37,8 @@ class ProviderResult:
 
 RECOVERABLE_PATTERNS = (
     "free usage limit", "rate limit", "429", "quota", "overloaded",
-    "502", "503", "504", "timeout", "timed out", "not found",
+    "502", "503", "504", "timeout", "timed out", "not found", "end of life",
+    "no longer available", "model unavailable", "model is unavailable", "retired",
 )
 
 

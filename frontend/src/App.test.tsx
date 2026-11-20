@@ -122,7 +122,7 @@ beforeEach(() => {
       const task = taskById(id)
       return jsonResponse({
         ...task,
-        result: id === 12 ? 'THE FINAL ANSWER' : '',
+        result: id === 12 ? 'THE FINAL ANSWER' : id === 40 ? 'Partial report' : '',
         children: id === 12 ? [{ ...task, id: 13, title: 'sub step', parent_id: 12 }] : [],
         plan_steps: [], qc_reviews: [], diff_path: '',
         preview: previews[id] ?? { kind: 'none', entry: '', url: '', size: 0, files: [] },
@@ -240,6 +240,7 @@ describe('one-page office', () => {
 
   it('shows the Team Conversation panel with persisted journal messages', async () => {
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Tim' }))
     const panel = await screen.findByTestId('team-conversation')
     expect(screen.getByText('Percakapan Tim')).toBeInTheDocument()
     await within(panel).findByText('Byte started on step 1')
@@ -251,6 +252,7 @@ describe('one-page office', () => {
 
   it('appends live task events and links speakers to recipients', async () => {
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Tim' }))
     const panel = await screen.findByTestId('team-conversation')
     await within(panel).findByText('Byte started on step 1')
     FakeEventSource.instances[0].emit('task_event', JSON.stringify({
@@ -265,6 +267,7 @@ describe('one-page office', () => {
 
   it('flags escalations from specialists to the leader', async () => {
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Tim' }))
     const panel = await screen.findByTestId('team-conversation')
     await within(panel).findByText('Byte started on step 1')
     FakeEventSource.instances[0].emit('task_event', JSON.stringify({
@@ -283,13 +286,27 @@ describe('one-page office', () => {
   it('lists a genuinely blocked run in the approvals panel', async () => {
     failedRun = { id: 40, title: 'Broken build', description: '', status: 'failed', priority: 'normal', agent_id: 2, parent_id: null, run_mode: 'conversation', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T04:00:00Z' }
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: /Perlu aksi/ }))
     const panel = await screen.findByTestId('approvals')
     expect(within(panel).getByText('Broken build')).toBeInTheDocument()
-    expect(within(panel).getByText(/pimpinan minta arahan/)).toBeInTheDocument()
+    expect(within(panel).getByText(/Pemulihan otomatis habis/)).toBeInTheDocument()
+  })
+
+  it('keeps a failed result available without locking the office behind a modal', async () => {
+    failedRun = { id: 40, title: 'Broken build', description: '', status: 'failed', priority: 'normal', agent_id: 2, parent_id: null, run_mode: 'conversation', artifact_path: '', created_at: '2026-10-24T01:00:00Z', updated_at: '2026-10-24T04:00:00Z' }
+    render(<App />)
+    // The queue fills from /api/tasks after mount; clicking before it arrives tested a race.
+    await screen.findByText('Broken build')
+    fireEvent.click(queueRow('Broken build'))
+    expect(await screen.findByText(/Hasil sementara tersedia/)).toBeInTheDocument()
+    expect(screen.queryByTestId('result-stage')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Buka hasil' }))
+    expect(await screen.findByTestId('result-stage')).toBeInTheDocument()
   })
 
   it('switches agent chatter between static and real', async () => {
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'AI' }))
     await waitFor(() => screen.getByText('AI Engine'))
     fireEvent.change(screen.getByLabelText('Agent chat mode'), { target: { value: 'milestone' } })
     await waitFor(() => {
@@ -301,6 +318,7 @@ describe('one-page office', () => {
 
   it('configures automatic engine rotation for exhausted providers', async () => {
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'AI' }))
     await waitFor(() => screen.getByText('AI Engine'))
     fireEvent.change(screen.getByLabelText('Rotate max'), { target: { value: '6' } })
     await waitFor(() => {
@@ -310,8 +328,9 @@ describe('one-page office', () => {
     })
   })
 
-  it('renders the AI engine bar in the collapsible settings and patches config', async () => {
+  it('renders the AI engine bar in the AI tab and patches config', async () => {
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'AI' }))
     await waitFor(() => screen.getByText('AI Engine'))
     fireEvent.click(screen.getByRole('checkbox', { name: 'AI enabled' }))
     await waitFor(() => {
@@ -323,6 +342,12 @@ describe('one-page office', () => {
 })
 
 describe('conversations on the same page', () => {
+  it('opens a waiting clarification instead of a running chat with a disabled input', async () => {
+    render(<App />)
+    await waitFor(() => expect(screen.getByLabelText('Pilih percakapan')).toHaveValue('8'))
+    expect(screen.getByLabelText('Message')).toBeEnabled()
+  })
+
   it('shows the chat transcript under the result', async () => {
     render(<App />)
     await waitFor(() => screen.getByText(/Terhubung/))
@@ -365,6 +390,7 @@ describe('conversations on the same page', () => {
 describe('journal', () => {
   it('appends realtime journal frames from the event stream', async () => {
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Tim' }))
     const source = FakeEventSource.instances[0]
     expect(source.url).toContain('/api/events/stream')
     source.emit('open')

@@ -230,3 +230,83 @@ class ClaudeEvent(Base):
     event: Mapped[str] = mapped_column(String(40), nullable=False)
     summary: Mapped[str] = mapped_column(String(160), default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class IntegrationAccount(Base):
+    """A connected external account. Tokens are DPAPI blobs, never plain text, and are never
+    returned by any API. Connecting does NOT grant permission to post: that stays human-gated."""
+    __tablename__ = "integration_accounts"
+    __table_args__ = (UniqueConstraint("provider", "external_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    label: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    token: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    refresh_token: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    scopes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="connected", nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow,
+                                                onupdate=utcnow, nullable=False)
+
+
+class OAuthState(Base):
+    """Single-use CSRF state for an OAuth round trip. No token is stored here."""
+    __tablename__ = "oauth_states"
+    state: Mapped[str] = mapped_column(String(80), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(24), nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String(400), nullable=False)
+    used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class PublishCredential(Base):
+    """API credentials for a custom REST endpoint. Token is a DPAPI blob, never plain text."""
+    __tablename__ = "publish_credentials"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    api_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    method: Mapped[str] = mapped_column(String(8), default="POST", nullable=False)
+    token: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    auth_header: Mapped[str] = mapped_column(String(60), default="Authorization", nullable=False)
+    auth_scheme: Mapped[str] = mapped_column(String(30), default="Bearer", nullable=False)
+    field_map_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    headers_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    enabled: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class PublishJob(Base):
+    """One external publish attempt. Preview is computed first; sending needs explicit approval."""
+    __tablename__ = "publish_jobs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    credential_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    preview_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="preview", nullable=False, index=True)
+    response_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NewsRun(Base):
+    """One scheduled news draft per local day. Unique date makes the scheduler idempotent."""
+    __tablename__ = "news_runs"
+    __table_args__ = (UniqueConstraint("run_date"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    topics: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
